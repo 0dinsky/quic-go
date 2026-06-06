@@ -94,6 +94,10 @@ type ConnectionIDGenerator interface {
 
 // Config contains all configuration data needed for a QUIC server or client.
 type Config struct {
+	// ClientRandomPrefix is applied to TLS ClientHello.Random in QUIC handshake.
+	// Used for TrustTunnel client_random_prefix authentication.
+	ClientRandomPrefix []byte
+	ClientRandomMask   []byte
 	// GetConfigForClient is called for incoming connections.
 	// If the error is not nil, the connection attempt is refused.
 	GetConfigForClient func(info *ClientInfo) (*Config, error)
