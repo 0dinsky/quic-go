@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/sagernet/quic-go/internal/protocol"
+
+	utls "github.com/metacubex/utls"
 	"github.com/sagernet/quic-go/internal/qerr"
 	"github.com/sagernet/quic-go/internal/utils"
 	"github.com/sagernet/quic-go/internal/wire"
@@ -27,7 +29,9 @@ const clientSessionStateRevision = 5
 
 type cryptoSetup struct {
 	tlsConf *tls.Config
-	conn    *tls.QUICConn
+	conn    quicTLSConn
+	clientRandomPrefix []byte
+	clientRandomMask   []byte
 
 	events []Event
 
@@ -76,6 +80,8 @@ func NewCryptoSetupClient(
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
 	version protocol.Version,
+	clientRandomPrefix []byte,
+	clientRandomMask []byte,
 ) CryptoSetup {
 	cs := newCryptoSetup(
 		connID,
@@ -91,11 +97,17 @@ func NewCryptoSetupClient(
 	tlsConf.MinVersion = tls.VersionTLS13
 	cs.tlsConf = tlsConf
 	cs.allow0RTT = enable0RTT
+	cs.clientRandomPrefix = clientRandomPrefix
+	cs.clientRandomMask = clientRandomMask
 
-	cs.conn = tls.QUICClient(&tls.QUICConfig{
-		TLSConfig:           tlsConf,
-		EnableSessionEvents: true,
-	})
+	if len(clientRandomPrefix) > 0 {
+		cs.conn = newUTLSQUICConn(tlsConf, utls.HelloChrome_Auto, clientRandomPrefix, clientRandomMask)
+	} else {
+		cs.conn = &stdQUICConn{tls.QUICClient(&tls.QUICConfig{
+			TLSConfig:           tlsConf,
+			EnableSessionEvents: true,
+		})}
+	}
 	cs.conn.SetTransportParameters(cs.ourParams.Marshal(protocol.PerspectiveClient))
 
 	return cs
@@ -127,10 +139,10 @@ func NewCryptoSetupServer(
 	tlsConf = setupConfigForServer(tlsConf, localAddr, remoteAddr)
 
 	cs.tlsConf = tlsConf
-	cs.conn = tls.QUICServer(&tls.QUICConfig{
+	cs.conn = &stdQUICConn{tls.QUICServer(&tls.QUICConfig{
 		TLSConfig:           tlsConf,
 		EnableSessionEvents: true,
-	})
+	})}
 	return cs
 }
 
