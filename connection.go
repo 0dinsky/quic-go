@@ -2986,6 +2986,8 @@ func (c *Conn) scheduleSending() {
 
 // tryQueueingUndecryptablePacket queues a packet for which we're missing the decryption keys.
 // The qlogevents.PacketType is only used for logging purposes.
+// tryQueueingUndecryptablePacket queues a packet for which we're missing the decryption keys.
+// The qlogevents.PacketType is only used for logging purposes.
 func (c *Conn) tryQueueingUndecryptablePacket(p receivedPacket, pt qlog.PacketType, datagramID qlog.DatagramID) {
 	if c.handshakeComplete {
 		panic("shouldn't queue undecryptable packets after handshake completion")
@@ -2993,4 +2995,21 @@ func (c *Conn) tryQueueingUndecryptablePacket(p receivedPacket, pt qlog.PacketTy
 	if len(c.undecryptablePackets)+1 > protocol.MaxUndecryptablePackets {
 		if c.qlogger != nil {
 			c.qlogger.RecordEvent(qlog.PacketDropped{
-				Header: qlog.Packet
+				Header: qlog.PacketHeader{
+					PacketType:   pt,
+					PacketNumber: protocol.InvalidPacketNumber,
+				},
+				Raw:        qlog.RawInfo{Length: len(p.data)},
+				DatagramID: datagramID,
+				Trigger:    qlog.PacketDropKeyUnavailable,
+			})
+		}
+		c.logger.Debugf("Dropping undecryptable %s packet (%d bytes). Too many undecryptable packets queued.", pt, p.Size())
+		return
+	}
+	c.undecryptablePackets = append(c.undecryptablePackets, receivedPacketWithDatagramID{
+		receivedPacket: p,
+		datagramID:     datagramID,
+	})
+	c.logger.Debugf("Queuing undecryptable %s packet (%d bytes) for later decryption.", pt, p.Size())
+}
