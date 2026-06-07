@@ -9,7 +9,7 @@ import (
 	utls "github.com/metacubex/utls"
 )
 
-// quicTLSConn — интерфейс для *tls.QUICConn и *utlsQUICConn
+// quicTLSConn — интерфейс для stdQUICConn и utlsQUICConn
 type quicTLSConn interface {
 	Start(ctx context.Context) error
 	Close() error
@@ -21,18 +21,17 @@ type quicTLSConn interface {
 	StoreSession(session *tls.SessionState) error
 }
 
-// stdQUICConn оборачивает *tls.QUICConn в интерфейс quicTLSConn
+// stdQUICConn оборачивает *tls.QUICConn
 type stdQUICConn struct{ *tls.QUICConn }
 
 func (c *stdQUICConn) StoreSession(session *tls.SessionState) error {
 	return c.QUICConn.StoreSession(session)
 }
 
-// utlsQUICConn оборачивает *utls.UQUICConn в интерфейс quicTLSConn.
-// Патчит client_random перед запуском handshake.
+// utlsQUICConn оборачивает *utls.UQUICConn с патчем client_random
 type utlsQUICConn struct {
 	conn               *utls.UQUICConn
-	uconn              *utls.UConn // доступ через reflection
+	uconn              *utls.UConn
 	clientRandomPrefix []byte
 	clientRandomMask   []byte
 }
@@ -51,11 +50,9 @@ func newUTLSQUICConn(tlsConf *tls.Config, id utls.ClientHelloID, prefix, mask []
 	}
 	q := utls.UQUICClient(cfg, id)
 
-	// Получаем приватное поле conn *UConn через reflection
 	var uconn *utls.UConn
 	v := reflect.ValueOf(q).Elem()
-	f := v.FieldByName("conn")
-	if f.IsValid() {
+	if f := v.FieldByName("conn"); f.IsValid() {
 		uconn = (*utls.UConn)(unsafe.Pointer(f.Pointer()))
 	}
 
@@ -101,10 +98,25 @@ func (c *utlsQUICConn) Start(ctx context.Context) error {
 
 func (c *utlsQUICConn) Close() error { return c.conn.Close() }
 
-func (c *utlsQUICConn) NextEvent() tls.QUICEvent { return c.conn.NextEvent() }
+// NextEvent конвертирует utls.QUICEvent → crypto/tls.QUICEvent
+// utls.QUICEventKind и tls.QUICEventKind — оба int, конвертируем напрямую.
+// utls.QUICEncryptionLevel и tls.QUICEncryptionLevel — оба int, аналогично.
+func (c *utlsQUICConn) NextEvent() tls.QUICEvent {
+	ev := c.conn.NextEvent()
+	out := tls.QUICEvent{
+		Kind:  tls.QUICEventKind(ev.Kind),
+		Level: tls.QUICEncryptionLevel(ev.Level),
+		Data:  ev.Data,
+	}
+	if ev.SessionState != nil {
+		// utls.SessionState и crypto/tls.SessionState имеют идентичный layout
+		out.SessionState = (*tls.SessionState)(unsafe.Pointer(ev.SessionState))
+	}
+	return out
+}
 
 func (c *utlsQUICConn) HandleData(level tls.QUICEncryptionLevel, data []byte) error {
-	return c.conn.HandleData(level, data)
+	return c.conn.HandleData(utls.QUICEncryptionLevel(level), data)
 }
 
 func (c *utlsQUICConn) SetTransportParameters(params []byte) {
@@ -112,14 +124,29 @@ func (c *utlsQUICConn) SetTransportParameters(params []byte) {
 }
 
 func (c *utlsQUICConn) ConnectionState() tls.ConnectionState {
-	return c.conn.ConnectionState()
+	cs := c.conn.ConnectionState()
+	return tls.ConnectionState{
+		Version:                     cs.Version,
+		HandshakeComplete:           cs.HandshakeComplete,
+		DidResume:                   cs.DidResume,
+		CipherSuite:                 cs.CipherSuite,
+		NegotiatedProtocol:          cs.NegotiatedProtocol,
+		NegotiatedProtocolIsMutual:  cs.NegotiatedProtocolIsMutual,
+		ServerName:                  cs.ServerName,
+		PeerCertificates:            cs.PeerCertificates,
+		VerifiedChains:              cs.VerifiedChains,
+		SignedCertificateTimestamps: cs.SignedCertificateTimestamps,
+		OCSPResponse:                cs.OCSPResponse,
+		TLSUnique:                   cs.TLSUnique,
+	}
 }
 
 func (c *utlsQUICConn) SendSessionTicket(opts tls.QUICSessionTicketOptions) error {
-	return c.conn.SendSessionTicket(opts)
+	return c.conn.SendSessionTicket(utls.QUICSessionTicketOptions{
+		EarlyData: opts.EarlyData,
+	})
 }
 
 func (c *utlsQUICConn) StoreSession(_ *tls.SessionState) error {
-	// UQUICConn не имеет StoreSession — no-op
 	return nil
 }
