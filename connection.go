@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/sagernet/quic-go/congestion"
 	"github.com/sagernet/quic-go/internal/ackhandler"
 	"github.com/sagernet/quic-go/internal/flowcontrol"
 	"github.com/sagernet/quic-go/internal/handshake"
@@ -3051,6 +3052,21 @@ func (c *Conn) ReceiveDatagram(ctx context.Context) ([]byte, error) {
 // It is nil if qlog is not enabled.
 func (c *Conn) QlogTrace() qlogwriter.Trace {
 	return c.qlogTrace
+}
+
+// SetCongestionControl replace the current congestion control algorithm with a new one.
+func (c *Conn) SetCongestionControl(cc congestion.CongestionControl) {
+	c.sentPacketHandler.SetCongestionControl(cc)
+}
+
+// SetRemoteAddr Replace the current remote addr with a new one
+func (c *Conn) SetRemoteAddr(addr net.Addr) {
+	c.conn.SetRemoteAddr(addr)
+}
+
+// Config Return current config
+func (c *Conn) Config() *Config {
+	return c.config
 }
 
 // LocalAddr returns the local address of the QUIC connection.
