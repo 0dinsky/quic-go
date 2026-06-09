@@ -3013,6 +3013,46 @@ func (c *Conn) tryQueueingUndecryptablePacket(p receivedPacket, pt qlog.PacketTy
 	c.logger.Debugf("Queuing undecryptable %s packet (%d bytes) for later decryption.", pt, p.Size())
 }
 
+// SendDatagram sends a message using a QUIC datagram, as specified in RFC 9221,
+// if the peer enabled datagram support.
+// There is no delivery guarantee for DATAGRAM frames, they are not retransmitted if lost.
+// The payload of the datagram needs to fit into a single QUIC packet.
+// In addition, a datagram may be dropped before being sent out if the available packet size suddenly decreases.
+// If the payload is too large to be sent at the current time, a DatagramTooLargeError is returned.
+func (c *Conn) SendDatagram(p []byte) error {
+	if !c.supportsDatagrams() {
+		return errors.New("datagram support disabled")
+	}
+
+	f := &wire.DatagramFrame{DataLenPresent: true}
+	// The payload size estimate is conservative.
+	// Under many circumstances we could send a few more bytes.
+	maxDataLen := min(
+		f.MaxDataLen(c.peerMaxDatagramFrameSize(), c.version),
+		protocol.ByteCount(c.currentMTUEstimate.Load()),
+	)
+	if protocol.ByteCount(len(p)) > maxDataLen {
+		return &DatagramTooLargeError{MaxDatagramPayloadSize: int64(maxDataLen)}
+	}
+	f.Data = make([]byte, len(p))
+	copy(f.Data, p)
+	return c.datagramQueue.Add(f)
+}
+
+// ReceiveDatagram gets a message received in a QUIC datagram, as specified in RFC 9221.
+func (c *Conn) ReceiveDatagram(ctx context.Context) ([]byte, error) {
+	if !c.config.EnableDatagrams {
+		return nil, errors.New("datagram support disabled")
+	}
+	return c.datagramQueue.Receive(ctx)
+}
+
+// QlogTrace returns the qlog trace of the QUIC connection.
+// It is nil if qlog is not enabled.
+func (c *Conn) QlogTrace() qlogwriter.Trace {
+	return c.qlogTrace
+}
+
 // LocalAddr returns the local address of the QUIC connection.
 func (c *Conn) LocalAddr() net.Addr { return c.conn.LocalAddr() }
 
