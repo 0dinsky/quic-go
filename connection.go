@@ -3013,3 +3013,34 @@ func (c *Conn) tryQueueingUndecryptablePacket(p receivedPacket, pt qlog.PacketTy
 	})
 	c.logger.Debugf("Queuing undecryptable %s packet (%d bytes) for later decryption.", pt, p.Size())
 }
+
+func (c *Conn) queueControlFrame(f wire.Frame) {
+	c.framer.QueueControlFrame(f)
+	c.scheduleSending()
+}
+
+func (c *Conn) onHasConnectionData() { c.scheduleSending() }
+
+func (c *Conn) onHasStreamData(id protocol.StreamID, str *SendStream) {
+	c.framer.AddActiveStream(id, str)
+	c.scheduleSending()
+}
+
+func (c *Conn) onHasStreamControlFrame(id protocol.StreamID, str streamControlFrameGetter) {
+	c.framer.AddStreamWithControlFrames(id, str)
+	c.scheduleSending()
+}
+
+func (c *Conn) onStreamCompleted(id protocol.StreamID) {
+	if err := c.streamsMap.DeleteStream(id); err != nil {
+		c.closeLocal(err)
+	}
+	c.framer.RemoveActiveStream(id)
+}
+
+// estimateMaxPayloadSize estimates the maximum payload size for short header packets.
+// It is not very sophisticated: it just subtracts the size of header (assuming the maximum
+// connection ID length), and the size of the encryption tag.
+func estimateMaxPayloadSize(mtu protocol.ByteCount) protocol.ByteCount {
+	return mtu - 1 /* type byte */ - 20 /* maximum connection ID length */ - 16 /* tag size */
+}
