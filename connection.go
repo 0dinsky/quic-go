@@ -14,7 +14,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/sagernet/quic-go/congestion"
 	"github.com/sagernet/quic-go/internal/ackhandler"
 	"github.com/sagernet/quic-go/internal/flowcontrol"
 	"github.com/sagernet/quic-go/internal/handshake"
@@ -3012,6 +3011,20 @@ func (c *Conn) tryQueueingUndecryptablePacket(p receivedPacket, pt qlog.PacketTy
 		datagramID:     datagramID,
 	})
 	c.logger.Debugf("Queuing undecryptable %s packet (%d bytes) for later decryption.", pt, p.Size())
+}
+
+// LocalAddr returns the local address of the QUIC connection.
+func (c *Conn) LocalAddr() net.Addr { return c.conn.LocalAddr() }
+
+// RemoteAddr returns the remote address of the QUIC connection.
+func (c *Conn) RemoteAddr() net.Addr { return c.conn.RemoteAddr() }
+
+// HandshakeComplete blocks until the handshake completes (or fails).
+// For the client, data sent before completion of the handshake is encrypted with 0-RTT keys.
+// For the server, data sent before completion of the handshake is encrypted with 1-RTT keys,
+// however the client's identity is only verified once the handshake completes.
+func (c *Conn) HandshakeComplete() <-chan struct{} {
+	return c.handshakeCompleteChan
 }
 
 func (c *Conn) queueControlFrame(f wire.Frame) {
