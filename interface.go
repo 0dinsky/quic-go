@@ -8,6 +8,7 @@ import (
 	"slices"
 	"time"
 
+	utls "github.com/metacubex/utls"
 	"github.com/sagernet/quic-go/internal/handshake"
 	"github.com/sagernet/quic-go/internal/protocol"
 	"github.com/sagernet/quic-go/qlogwriter"
@@ -98,6 +99,9 @@ type Config struct {
 	// Used for TrustTunnel client_random_prefix authentication.
 	ClientRandomPrefix []byte
 	ClientRandomMask   []byte
+	// ClientHelloID sets the uTLS fingerprint when ClientRandomPrefix is used.
+	// Defaults to HelloChrome_Auto if not set.
+	ClientHelloID utls.ClientHelloID
 	// GetConfigForClient is called for incoming connections.
 	// If the error is not nil, the connection attempt is refused.
 	GetConfigForClient func(info *ClientInfo) (*Config, error)
