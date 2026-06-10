@@ -82,6 +82,7 @@ func NewCryptoSetupClient(
 	version protocol.Version,
 	clientRandomPrefix []byte,
 	clientRandomMask []byte,
+	clientHelloID utls.ClientHelloID,
 ) CryptoSetup {
 	cs := newCryptoSetup(
 		connID,
@@ -101,7 +102,11 @@ func NewCryptoSetupClient(
 	cs.clientRandomMask = clientRandomMask
 
 	if len(clientRandomPrefix) > 0 {
-		cs.conn = newUTLSQUICConn(tlsConf, utls.HelloChrome_Auto, clientRandomPrefix, clientRandomMask)
+		id := clientHelloID
+		if id == (utls.ClientHelloID{}) {
+			id = utls.HelloChrome_Auto
+		}
+		cs.conn = newUTLSQUICConn(tlsConf, id, clientRandomPrefix, clientRandomMask)
 	} else {
 		cs.conn = &stdQUICConn{tls.QUICClient(&tls.QUICConfig{
 			TLSConfig:           tlsConf,
