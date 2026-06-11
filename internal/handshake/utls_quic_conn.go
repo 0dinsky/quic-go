@@ -75,6 +75,11 @@ func (c *utlsQUICConn) patchClientRandom() {
 	if hello == nil || len(hello.Random) < 32 {
 		return
 	}
+	// Копируем текущий Random, патчим prefix с маской, передаём через SetClientRandom.
+	// SetClientRandom устанавливает Random в HandshakeState.Hello.Random,
+	// после чего HandshakeContext вызовет MarshalClientHello и запишет его в Raw.
+	patched := make([]byte, 32)
+	copy(patched, hello.Random)
 	prefixLen := len(c.clientRandomPrefix)
 	if prefixLen > 32 {
 		prefixLen = 32
@@ -84,11 +89,9 @@ func (c *utlsQUICConn) patchClientRandom() {
 		if i < len(c.clientRandomMask) {
 			mask = c.clientRandomMask[i]
 		}
-		hello.Random[i] = (c.clientRandomPrefix[i] & mask) | (hello.Random[i] & ^mask)
+		patched[i] = (c.clientRandomPrefix[i] & mask) | (patched[i] & ^mask)
 	}
-	if len(hello.Raw) >= 38 {
-		copy(hello.Raw[6:38], hello.Random)
-	}
+	_ = c.uconn.SetClientRandom(patched)
 }
 
 func (c *utlsQUICConn) Start(ctx context.Context) error {
