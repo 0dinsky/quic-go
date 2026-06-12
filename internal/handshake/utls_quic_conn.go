@@ -75,9 +75,7 @@ func (c *utlsQUICConn) patchClientRandom() {
 	if hello == nil || len(hello.Random) < 32 {
 		return
 	}
-	// Копируем текущий Random, патчим prefix с маской, передаём через SetClientRandom.
-	// SetClientRandom устанавливает Random в HandshakeState.Hello.Random,
-	// после чего HandshakeContext вызовет MarshalClientHello и запишет его в Raw.
+	// Копируем текущий Random и патчим prefix с маской (как в TCP-пути).
 	patched := make([]byte, 32)
 	copy(patched, hello.Random)
 	prefixLen := len(c.clientRandomPrefix)
@@ -91,7 +89,15 @@ func (c *utlsQUICConn) patchClientRandom() {
 		}
 		patched[i] = (c.clientRandomPrefix[i] & mask) | (patched[i] & ^mask)
 	}
-	_ = c.uconn.SetClientRandom(patched)
+	if err := c.uconn.SetClientRandom(patched); err != nil {
+		return
+	}
+	// SetClientRandom обновляет только HandshakeState.Hello.Random,
+	// но НЕ синхронизирует уже замаршаленный HandshakeState.Hello.Raw,
+	// который и отправляется на провод. Синхронизируем вручную (как в TCP-пути).
+	if raw := c.uconn.HandshakeState.Hello.Raw; len(raw) >= 38 {
+		copy(raw[6:38], patched)
+	}
 }
 
 func (c *utlsQUICConn) Start(ctx context.Context) error {
