@@ -3,7 +3,10 @@ package handshake
 import (
 	"context"
 	"crypto/tls"
+	"encoding/hex"
+	"os"
 	"reflect"
+	"strconv"
 	"unsafe"
 
 	utls "github.com/metacubex/utls"
@@ -102,6 +105,15 @@ func (c *utlsQUICConn) patchClientRandom() {
 
 func (c *utlsQUICConn) Start(ctx context.Context) error {
 	c.patchClientRandom()
+	if c.uconn != nil && c.uconn.HandshakeState.Hello != nil {
+		h := c.uconn.HandshakeState.Hello
+		if len(h.Random) >= 4 {
+			os.Stderr.WriteString("DBG Start: Random[0:4]=" + hex.EncodeToString(h.Random[:4]) + "\n")
+		}
+		if len(h.Raw) >= 38 {
+			os.Stderr.WriteString("DBG Start: Raw[6:10]=" + hex.EncodeToString(h.Raw[6:10]) + "\n")
+		}
+	}
 	return c.conn.Start(ctx)
 }
 
@@ -112,6 +124,15 @@ func (c *utlsQUICConn) Close() error { return c.conn.Close() }
 // utls.QUICEncryptionLevel и tls.QUICEncryptionLevel — оба int, аналогично.
 func (c *utlsQUICConn) NextEvent() tls.QUICEvent {
 	ev := c.conn.NextEvent()
+	if ev.Kind == utls.QUICWriteData && len(ev.Data) >= 6 {
+		os.Stderr.WriteString("DBG NextEvent WriteData level=" + strconv.Itoa(int(ev.Level)) + " len=" + strconv.Itoa(len(ev.Data)) + " data[0:10]=" + hex.EncodeToString(ev.Data[:min(10,len(ev.Data))]) + "\n")
+		if c.uconn != nil && c.uconn.HandshakeState.Hello != nil {
+			h := c.uconn.HandshakeState.Hello
+			if len(h.Raw) >= 38 {
+				os.Stderr.WriteString("DBG NextEvent: current Hello.Raw[6:10]=" + hex.EncodeToString(h.Raw[6:10]) + " Random[0:4]=" + hex.EncodeToString(h.Random[:4]) + "\n")
+			}
+		}
+	}
 	out := tls.QUICEvent{
 		Kind:  tls.QUICEventKind(ev.Kind),
 		Level: tls.QUICEncryptionLevel(ev.Level),
