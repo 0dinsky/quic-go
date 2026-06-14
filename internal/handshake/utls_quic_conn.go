@@ -113,7 +113,26 @@ func (c *utlsQUICConn) patchClientRandom() {
 		}
 		return
 	}
-	// SetClientRandom обновляет только HandshakeState.Hello.Random.
+	if c.uconn.ClientHelloID == utls.HelloGolang {
+		// For HelloGolang, BuildHandshakeState() builds the ClientHello via
+		// the standard Go TLS makeClientHello() path, which does NOT call
+		// MarshalClientHello()/set Hello.Raw — and correctly populates
+		// hello.quicTransportParameters (required for QUIC, RFC 9001).
+		// uTLS's MarshalClientHello()/MarshalClientHelloNoECH() serialize
+		// from uconn.Extensions (the uTLS preset extension list), which is
+		// empty for HelloGolang and does NOT include quic_transport_parameters.
+		// Calling it here would produce a ClientHello missing extension 57,
+		// silently breaking the QUIC handshake (no packets ever sent).
+		// So: just ensure Raw is unset, so the stdlib clientHelloMsg.marshal()
+		// (marshalMsg) is used later, serializing the patched Random and the
+		// quic_transport_parameters extension from struct fields directly.
+		c.uconn.HandshakeState.Hello.Raw = nil
+		if c.logger != nil {
+			c.logger.Debugf("trusttunnel-debug: patched (HelloGolang/QUIC path). Random[0:4]=%s", hex.EncodeToString(c.uconn.HandshakeState.Hello.Random[:4]))
+		}
+		return
+	}
+	// Копируем текущий Random и патчим prefix с маской (как в TCP-пути).
 	// Hello.Raw уже был замаршален с оригинальным Random при первом BuildHandshakeState.
 	// Пересобираем Raw полностью через официальный API utls, который заново
 	// сериализует весь ClientHello (включая обновлённый Random).
