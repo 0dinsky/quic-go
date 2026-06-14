@@ -129,5 +129,8 @@ func populateConfig(config *Config) *Config {
 		Tracer:                           config.Tracer,
 		MaxDatagramFrameSize:             config.MaxDatagramFrameSize,
 		DisablePathManager:               config.DisablePathManager,
+		ClientRandomPrefix:               config.ClientRandomPrefix,
+		ClientRandomMask:                 config.ClientRandomMask,
+		ClientHelloID:                    config.ClientHelloID,
 	}
 }
