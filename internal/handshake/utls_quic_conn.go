@@ -4,10 +4,10 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/hex"
-	"os"
 	"reflect"
-	"strconv"
 	"unsafe"
+
+	"github.com/sagernet/quic-go/internal/utils"
 
 	utls "github.com/metacubex/utls"
 )
@@ -37,9 +37,10 @@ type utlsQUICConn struct {
 	uconn              *utls.UConn
 	clientRandomPrefix []byte
 	clientRandomMask   []byte
+	logger             utils.Logger
 }
 
-func newUTLSQUICConn(tlsConf *tls.Config, id utls.ClientHelloID, prefix, mask []byte) *utlsQUICConn {
+func newUTLSQUICConn(tlsConf *tls.Config, id utls.ClientHelloID, prefix, mask []byte, logger utils.Logger) *utlsQUICConn {
 	cfg := &utls.QUICConfig{
 		TLSConfig: &utls.Config{
 			ServerName:             tlsConf.ServerName,
@@ -59,23 +60,37 @@ func newUTLSQUICConn(tlsConf *tls.Config, id utls.ClientHelloID, prefix, mask []
 		uconn = (*utls.UConn)(unsafe.Pointer(f.Pointer()))
 	}
 
+	if logger != nil {
+		logger.Debugf("trusttunnel-debug: newUTLSQUICConn uconn_nil=%v prefix=%x mask=%x", uconn == nil, prefix, mask)
+	}
+
 	return &utlsQUICConn{
 		conn:               q,
 		uconn:              uconn,
 		clientRandomPrefix: prefix,
 		clientRandomMask:   mask,
+		logger:             logger,
 	}
 }
 
 func (c *utlsQUICConn) patchClientRandom() {
+	if c.logger != nil {
+		c.logger.Debugf("trusttunnel-debug: patchClientRandom called, prefixLen=%d uconn_nil=%v", len(c.clientRandomPrefix), c.uconn == nil)
+	}
 	if len(c.clientRandomPrefix) == 0 || c.uconn == nil {
 		return
 	}
 	if err := c.uconn.BuildHandshakeState(); err != nil {
+		if c.logger != nil {
+			c.logger.Debugf("trusttunnel-debug: BuildHandshakeState error: %v", err)
+		}
 		return
 	}
 	hello := c.uconn.HandshakeState.Hello
 	if hello == nil || len(hello.Random) < 32 {
+		if c.logger != nil {
+			c.logger.Debugf("trusttunnel-debug: hello nil or random too short, hello_nil=%v", hello == nil)
+		}
 		return
 	}
 	// Копируем текущий Random и патчим prefix с маской (как в TCP-пути).
@@ -93,27 +108,28 @@ func (c *utlsQUICConn) patchClientRandom() {
 		patched[i] = (c.clientRandomPrefix[i] & mask) | (patched[i] & ^mask)
 	}
 	if err := c.uconn.SetClientRandom(patched); err != nil {
+		if c.logger != nil {
+			c.logger.Debugf("trusttunnel-debug: SetClientRandom error: %v", err)
+		}
 		return
 	}
-	// SetClientRandom обновляет только HandshakeState.Hello.Random,
-	// но НЕ синхронизирует уже замаршаленный HandshakeState.Hello.Raw,
-	// который и отправляется на провод. Синхронизируем вручную (как в TCP-пути).
-	if raw := c.uconn.HandshakeState.Hello.Raw; len(raw) >= 38 {
-		copy(raw[6:38], patched)
+	// SetClientRandom обновляет только HandshakeState.Hello.Random.
+	// Hello.Raw уже был замаршален с оригинальным Random при первом BuildHandshakeState.
+	// Пересобираем Raw полностью через официальный API utls, который заново
+	// сериализует весь ClientHello (включая обновлённый Random).
+	if err := c.uconn.MarshalClientHello(); err != nil {
+		if c.logger != nil {
+			c.logger.Debugf("trusttunnel-debug: MarshalClientHello error: %v", err)
+		}
+		return
+	}
+	if c.logger != nil {
+		c.logger.Debugf("trusttunnel-debug: patched. Random[0:4]=%s Raw[6:10]=%s", hex.EncodeToString(c.uconn.HandshakeState.Hello.Random[:4]), hex.EncodeToString(c.uconn.HandshakeState.Hello.Raw[6:10]))
 	}
 }
 
 func (c *utlsQUICConn) Start(ctx context.Context) error {
 	c.patchClientRandom()
-	if c.uconn != nil && c.uconn.HandshakeState.Hello != nil {
-		h := c.uconn.HandshakeState.Hello
-		if len(h.Random) >= 4 {
-			os.Stderr.WriteString("DBG Start: Random[0:4]=" + hex.EncodeToString(h.Random[:4]) + "\n")
-		}
-		if len(h.Raw) >= 38 {
-			os.Stderr.WriteString("DBG Start: Raw[6:10]=" + hex.EncodeToString(h.Raw[6:10]) + "\n")
-		}
-	}
 	return c.conn.Start(ctx)
 }
 
@@ -124,12 +140,17 @@ func (c *utlsQUICConn) Close() error { return c.conn.Close() }
 // utls.QUICEncryptionLevel и tls.QUICEncryptionLevel — оба int, аналогично.
 func (c *utlsQUICConn) NextEvent() tls.QUICEvent {
 	ev := c.conn.NextEvent()
-	if ev.Kind == utls.QUICWriteData && len(ev.Data) >= 6 {
-		os.Stderr.WriteString("DBG NextEvent WriteData level=" + strconv.Itoa(int(ev.Level)) + " len=" + strconv.Itoa(len(ev.Data)) + " data[0:10]=" + hex.EncodeToString(ev.Data[:min(10,len(ev.Data))]) + "\n")
+	if ev.Kind == utls.QUICWriteData && len(ev.Data) >= 6 && c.logger != nil {
+		dataLen := len(ev.Data)
+		preview := dataLen
+		if preview > 10 {
+			preview = 10
+		}
+		c.logger.Debugf("trusttunnel-debug: NextEvent WriteData level=%d len=%d data[0:%d]=%s", ev.Level, dataLen, preview, hex.EncodeToString(ev.Data[:preview]))
 		if c.uconn != nil && c.uconn.HandshakeState.Hello != nil {
 			h := c.uconn.HandshakeState.Hello
 			if len(h.Raw) >= 38 {
-				os.Stderr.WriteString("DBG NextEvent: current Hello.Raw[6:10]=" + hex.EncodeToString(h.Raw[6:10]) + " Random[0:4]=" + hex.EncodeToString(h.Random[:4]) + "\n")
+				c.logger.Debugf("trusttunnel-debug: at NextEvent Hello.Raw[6:10]=%s Random[0:4]=%s", hex.EncodeToString(h.Raw[6:10]), hex.EncodeToString(h.Random[:4]))
 			}
 		}
 	}
