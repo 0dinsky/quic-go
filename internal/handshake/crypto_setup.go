@@ -102,10 +102,15 @@ func NewCryptoSetupClient(
 	cs.clientRandomMask = clientRandomMask
 
 	if len(clientRandomPrefix) > 0 {
-		id := clientHelloID
-		if id == (utls.ClientHelloID{}) {
-			id = utls.HelloChrome_Auto
-		}
+		// uTLS fingerprint presets (Chrome/Firefox/etc.) do not populate the
+		// quic_transport_parameters (57) extension for QUIC ClientHellos —
+		// this code path is explicitly disabled upstream in utls
+		// ("not ready yet"). Using a fingerprint preset here results in a
+		// ClientHello missing extension 57, which silently breaks the QUIC
+		// handshake (no packets are ever sent). Force HelloGolang so the
+		// standard Go TLS ClientHello-building path is used, which correctly
+		// calls quicGetTransportParameters() and sets hello.quicTransportParameters.
+		id := utls.HelloGolang
 		cs.conn = newUTLSQUICConn(tlsConf, id, clientRandomPrefix, clientRandomMask, logger)
 	} else {
 		cs.conn = &stdQUICConn{tls.QUICClient(&tls.QUICConfig{
