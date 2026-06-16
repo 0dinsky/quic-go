@@ -163,7 +163,6 @@ func (c *utlsQUICConn) Close() error { return c.conn.Close() }
 func (c *utlsQUICConn) NextEvent() tls.QUICEvent {
 	ev := c.conn.NextEvent()
 	if ev.Kind == utls.QUICWriteData && len(ev.Data) >= 6 && c.logger != nil {
-	if ev.Kind == utls.QUICWriteData && len(ev.Data) >= 6 && c.logger != nil {
 		dataLen := len(ev.Data)
 		preview := dataLen
 		if preview > 10 {
