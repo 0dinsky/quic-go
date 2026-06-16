@@ -38,7 +38,6 @@ type utlsQUICConn struct {
 	clientRandomPrefix []byte
 	clientRandomMask   []byte
 	logger             utils.Logger
-	clientHelloPatchedOnWire bool
 }
 
 func newUTLSQUICConn(tlsConf *tls.Config, id utls.ClientHelloID, prefix, mask []byte, logger utils.Logger) *utlsQUICConn {
@@ -150,6 +149,9 @@ func (c *utlsQUICConn) patchClientRandom() {
 
 func (c *utlsQUICConn) Start(ctx context.Context) error {
 	c.patchClientRandom()
+	if c.logger != nil && c.uconn != nil && c.uconn.HandshakeState.Hello != nil {
+		c.logger.Debugf("trusttunnel-debug: at Start() before conn.Start, Hello.Random[0:4]=%s Hello.Raw_is_nil=%v", hex.EncodeToString(c.uconn.HandshakeState.Hello.Random[:4]), c.uconn.HandshakeState.Hello.Raw == nil)
+	}
 	return c.conn.Start(ctx)
 }
 
@@ -160,42 +162,7 @@ func (c *utlsQUICConn) Close() error { return c.conn.Close() }
 // utls.QUICEncryptionLevel и tls.QUICEncryptionLevel — оба int, аналогично.
 func (c *utlsQUICConn) NextEvent() tls.QUICEvent {
 	ev := c.conn.NextEvent()
-	if ev.Kind == utls.QUICWriteData && len(ev.Data) >= 6 && !c.clientHelloPatchedOnWire && len(c.clientRandomPrefix) > 0 && ev.Data[0] == 0x01 {
-		// Last-resort: patch client_random directly in the serialized
-		// ClientHello bytes as they're emitted for the QUIC Initial packet.
-		// ev.Data[0] == 0x01 is the TLS Handshake message type (ClientHello);
-		// random is at bytes [6:38] (1 byte type + 3 bytes length + 2 bytes
-		// legacy_version + 32 bytes random). This is independent of utls's
-		// internal Hello/Raw/marshal state (BuildByGoTLS vs BuildByUtls),
-		// so it works regardless of which ClientHello-building path was used.
-		// Length check relaxed to >=6 since the ClientHello-start chunk may
-		// be shorter than 38 bytes if split across multiple QUICWriteData events.
-		{
-			available := len(ev.Data) - 6
-			prefixLen := len(c.clientRandomPrefix)
-			if prefixLen > 32 {
-				prefixLen = 32
-			}
-			if prefixLen > available {
-				prefixLen = available
-			}
-			for i := 0; i < prefixLen; i++ {
-				mask := byte(0xff)
-				if i < len(c.clientRandomMask) {
-					mask = c.clientRandomMask[i]
-				}
-				ev.Data[6+i] = (c.clientRandomPrefix[i] & mask) | (ev.Data[6+i] & ^mask)
-			}
-			c.clientHelloPatchedOnWire = true
-			if c.logger != nil {
-				logEnd := 10
-				if len(ev.Data) < logEnd {
-					logEnd = len(ev.Data)
-				}
-				c.logger.Debugf("trusttunnel-debug: patched on wire (len=%d). Random[0:%d]=%s", len(ev.Data), logEnd-6, hex.EncodeToString(ev.Data[6:logEnd]))
-			}
-		}
-	}
+	if ev.Kind == utls.QUICWriteData && len(ev.Data) >= 6 && c.logger != nil {
 	if ev.Kind == utls.QUICWriteData && len(ev.Data) >= 6 && c.logger != nil {
 		dataLen := len(ev.Data)
 		preview := dataLen
