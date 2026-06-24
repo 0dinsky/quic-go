@@ -179,6 +179,7 @@ func (c *utlsQUICConn) NextEvent() tls.QUICEvent {
 	out := tls.QUICEvent{
 		Kind:  tls.QUICEventKind(ev.Kind),
 		Level: tls.QUICEncryptionLevel(ev.Level),
+		Suite: ev.Suite,
 		Data:  ev.Data,
 	}
 	if ev.SessionState != nil {
