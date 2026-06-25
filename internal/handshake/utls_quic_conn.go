@@ -3,7 +3,6 @@ package handshake
 import (
 	"context"
 	"crypto/tls"
-	"reflect"
 	"unsafe"
 
 	"github.com/sagernet/quic-go/internal/utils"
@@ -53,11 +52,10 @@ func newUTLSQUICConn(tlsConf *tls.Config, id utls.ClientHelloID, prefix, mask []
 	}
 	q := utls.UQUICClient(cfg, id)
 
-	var uconn *utls.UConn
-	v := reflect.ValueOf(q).Elem()
-	if f := v.FieldByName("conn"); f.IsValid() {
-		uconn = (*utls.UConn)(unsafe.Pointer(f.Pointer()))
-	}
+	// UQUICConn layout: первое поле — conn *UConn (unexported).
+	// reflect.Value.Pointer() на unexported поле вызывает panic, поэтому
+	// используем прямой unsafe-каст: разыменовываем первое слово структуры.
+	uconn := *(**utls.UConn)(unsafe.Pointer(q))
 
 	return &utlsQUICConn{
 		conn:               q,
@@ -73,10 +71,12 @@ func (c *utlsQUICConn) patchClientRandom() {
 		return
 	}
 	if err := c.uconn.BuildHandshakeState(); err != nil {
+		c.logger.Errorf("utlsQUICConn: BuildHandshakeState failed: %v", err)
 		return
 	}
 	hello := c.uconn.HandshakeState.Hello
 	if hello == nil || len(hello.Random) < 32 {
+		c.logger.Errorf("utlsQUICConn: Hello.Random not available after BuildHandshakeState")
 		return
 	}
 	patched := make([]byte, 32)
@@ -93,6 +93,7 @@ func (c *utlsQUICConn) patchClientRandom() {
 		patched[i] = (c.clientRandomPrefix[i] & mask) | (patched[i] & ^mask)
 	}
 	if err := c.uconn.SetClientRandom(patched); err != nil {
+		c.logger.Errorf("utlsQUICConn: SetClientRandom failed: %v", err)
 		return
 	}
 	if c.uconn.ClientHelloID == utls.HelloGolang {
@@ -100,10 +101,15 @@ func (c *utlsQUICConn) patchClientRandom() {
 		// which correctly includes quic_transport_parameters (ext 57, RFC 9001).
 		// Raw must be nil so stdlib marshalMsg() serializes the patched Random.
 		c.uconn.HandshakeState.Hello.Raw = nil
+		c.logger.Debugf("utlsQUICConn: client_random prefix patched (HelloGolang), prefix=%x", patched[:prefixLen])
 		return
 	}
 	// For uTLS presets: re-marshal with patched Random via official API.
-	_ = c.uconn.MarshalClientHello()
+	if err := c.uconn.MarshalClientHello(); err != nil {
+		c.logger.Errorf("utlsQUICConn: MarshalClientHello failed: %v", err)
+		return
+	}
+	c.logger.Debugf("utlsQUICConn: client_random prefix patched (uTLS preset), prefix=%x", patched[:prefixLen])
 }
 
 func (c *utlsQUICConn) Start(ctx context.Context) error {
