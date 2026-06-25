@@ -2,6 +2,7 @@ package handshake
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"io"
 	"unsafe"
@@ -30,18 +31,19 @@ func (c *stdQUICConn) StoreSession(session *tls.SessionState) error {
 	return c.QUICConn.StoreSession(session)
 }
 
-// patchedRand реализует io.Reader с патчем Client Random
+// patchedRand перехватывает первое чтение (генерацию ClientRandom) 
+// и накладывает маску/префикс на лету.
 type patchedRand struct {
-	r      io.Reader
+	parent io.Reader
 	prefix []byte
 	mask   []byte
 	done   bool
 }
 
 func (pr *patchedRand) Read(p []byte) (n int, err error) {
-	n, err = pr.r.Read(p)
-	// Первое чтение на 32 байта в клиенте — это ClientRandom
-	if !pr.done && len(p) == 32 && n == 32 {
+	n, err = pr.parent.Read(p)
+	// Первое чтение ровно на 32 байта в контексте клиента — это всегда ClientRandom
+	if !pr.done && len(p) == 32 && err == nil {
 		prefixLen := len(pr.prefix)
 		if prefixLen > 32 {
 			prefixLen = 32
@@ -58,20 +60,25 @@ func (pr *patchedRand) Read(p []byte) (n int, err error) {
 	return n, err
 }
 
-// utlsQUICConn оборачивает *utls.UQUICConn с патчем client_random
+// utlsQUICConn оборачивает *utls.UQUICConn (без патча памяти)
 type utlsQUICConn struct {
 	conn   *utls.UQUICConn
 	logger utils.Logger
 }
 
 func newUTLSQUICConn(tlsConf *tls.Config, id utls.ClientHelloID, prefix, mask []byte, logger utils.Logger) *utlsQUICConn {
-	// Создаем патченный Rand для внедрения клиентского рандома
-	patchedRand := &patchedRand{
-		r:      tlsConf.Rand, // если nil, внутри uTLS будет использован crypto/rand.Reader
+	baseRand := tlsConf.Rand
+	if baseRand == nil {
+		baseRand = rand.Reader
+	}
+
+	// Оборачиваем источник энтропии, чтобы безопасно пропатчить ClientRandom
+	prand := &patchedRand{
+		parent: baseRand,
 		prefix: prefix,
 		mask:   mask,
 	}
-	
+
 	cfg := &utls.QUICConfig{
 		TLSConfig: &utls.Config{
 			ServerName:             tlsConf.ServerName,
@@ -80,18 +87,20 @@ func newUTLSQUICConn(tlsConf *tls.Config, id utls.ClientHelloID, prefix, mask []
 			InsecureSkipVerify:     tlsConf.InsecureSkipVerify,
 			MinVersion:             tls.VersionTLS13,
 			SessionTicketsDisabled: tlsConf.SessionTicketsDisabled,
-			Rand:                   patchedRand, // внедряем патченный Rand
+			Rand:                   prand, // Подставляем наш генератор
 		},
 		EnableSessionEvents: true,
 	}
-	
+	q := utls.UQUICClient(cfg, id)
+
 	return &utlsQUICConn{
-		conn:   utls.UQUICClient(cfg, id),
+		conn:   q,
 		logger: logger,
 	}
 }
 
 func (c *utlsQUICConn) Start(ctx context.Context) error {
+	// uTLS соберет пакет сам, ClientRandom заполнится из нашего patchedRand.
 	return c.conn.Start(ctx)
 }
 
@@ -144,9 +153,6 @@ func (c *utlsQUICConn) SendSessionTicket(opts tls.QUICSessionTicketOptions) erro
 	})
 }
 
-func (c *utlsQUICConn) StoreSession(session *tls.SessionState) error {
-	// uTLS UQUICConn не имеет метода StoreSession, поэтому просто возвращаем nil
-	// Если нужна поддержка хранения сессий, можно реализовать через unsafe,
-	// но обычно для QUIC с uTLS это не требуется
+func (c *utlsQUICConn) StoreSession(_ *tls.SessionState) error {
 	return nil
 }
