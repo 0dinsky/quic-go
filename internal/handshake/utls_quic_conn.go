@@ -3,6 +3,7 @@ package handshake
 import (
 	"context"
 	"crypto/tls"
+	"reflect"
 	"unsafe"
 
 	"github.com/sagernet/quic-go/internal/utils"
@@ -52,10 +53,11 @@ func newUTLSQUICConn(tlsConf *tls.Config, id utls.ClientHelloID, prefix, mask []
 	}
 	q := utls.UQUICClient(cfg, id)
 
-	// UQUICConn layout: первое поле — conn *UConn (unexported).
-	// reflect.Value.Pointer() на unexported поле вызывает panic, поэтому
-	// используем прямой unsafe-каст: разыменовываем первое слово структуры.
-	uconn := *(**utls.UConn)(unsafe.Pointer(q))
+	var uconn *utls.UConn
+	v := reflect.ValueOf(q).Elem()
+	if f := v.FieldByName("conn"); f.IsValid() {
+		uconn = (*utls.UConn)(unsafe.Pointer(f.Pointer()))
+	}
 
 	return &utlsQUICConn{
 		conn:               q,
@@ -71,16 +73,18 @@ func (c *utlsQUICConn) patchClientRandom() {
 		return
 	}
 	if err := c.uconn.BuildHandshakeState(); err != nil {
-		c.logger.Errorf("utlsQUICConn: BuildHandshakeState failed: %v", err)
 		return
 	}
 	hello := c.uconn.HandshakeState.Hello
 	if hello == nil || len(hello.Random) < 32 {
-		c.logger.Errorf("utlsQUICConn: Hello.Random not available after BuildHandshakeState")
 		return
 	}
-	patched := make([]byte, 32)
-	copy(patched, hello.Random)
+	// Patch IN PLACE: hello.Random shares its underlying array with the private
+	// clientHelloMsg.random field (getPublicPtr copies the slice header, not the data).
+	// Modifying bytes in-place keeps both in sync.
+	// DO NOT use SetClientRandom — it replaces the slice header in the public struct
+	// with a new allocation, leaving clientHelloMsg.random pointing to the original
+	// (unpatched) array. marshal() then serialises the unpatched random.
 	prefixLen := len(c.clientRandomPrefix)
 	if prefixLen > 32 {
 		prefixLen = 32
@@ -90,26 +94,17 @@ func (c *utlsQUICConn) patchClientRandom() {
 		if i < len(c.clientRandomMask) {
 			mask = c.clientRandomMask[i]
 		}
-		patched[i] = (c.clientRandomPrefix[i] & mask) | (patched[i] & ^mask)
-	}
-	if err := c.uconn.SetClientRandom(patched); err != nil {
-		c.logger.Errorf("utlsQUICConn: SetClientRandom failed: %v", err)
-		return
+		hello.Random[i] = (c.clientRandomPrefix[i] & mask) | (hello.Random[i] & ^mask)
 	}
 	if c.uconn.ClientHelloID == utls.HelloGolang {
 		// For HelloGolang the ClientHello is built via stdlib makeClientHello()
 		// which correctly includes quic_transport_parameters (ext 57, RFC 9001).
 		// Raw must be nil so stdlib marshalMsg() serializes the patched Random.
 		c.uconn.HandshakeState.Hello.Raw = nil
-		c.logger.Debugf("utlsQUICConn: client_random prefix patched (HelloGolang), prefix=%x", patched[:prefixLen])
 		return
 	}
 	// For uTLS presets: re-marshal with patched Random via official API.
-	if err := c.uconn.MarshalClientHello(); err != nil {
-		c.logger.Errorf("utlsQUICConn: MarshalClientHello failed: %v", err)
-		return
-	}
-	c.logger.Debugf("utlsQUICConn: client_random prefix patched (uTLS preset), prefix=%x", patched[:prefixLen])
+	_ = c.uconn.MarshalClientHello()
 }
 
 func (c *utlsQUICConn) Start(ctx context.Context) error {
