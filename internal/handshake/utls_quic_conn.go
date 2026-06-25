@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
-	"reflect"
 	"unsafe"
 
 	"github.com/sagernet/quic-go/internal/utils"
