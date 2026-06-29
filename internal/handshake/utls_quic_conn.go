@@ -48,6 +48,11 @@ func newUTLSQUICConn(tlsConf *tls.Config, id utls.ClientHelloID, prefix, mask []
 			InsecureSkipVerify:     tlsConf.InsecureSkipVerify,
 			MinVersion:             tls.VersionTLS13,
 			SessionTicketsDisabled: tlsConf.SessionTicketsDisabled,
+			// utls (Go 1.24 fork) includes X25519MLKEM768 (0x11ec) by default.
+			// Most servers (quiche, older BoringSSL, rustls) silently drop
+			// ClientHellos with this 1216-byte key share. Explicitly limit to
+			// classical curves, or propagate caller's CurvePreferences if set.
+			CurvePreferences: curvePrefsFromStdlib(tlsConf.CurvePreferences),
 		},
 		EnableSessionEvents: true,
 	}
@@ -171,4 +176,25 @@ func (c *utlsQUICConn) SendSessionTicket(opts tls.QUICSessionTicketOptions) erro
 
 func (c *utlsQUICConn) StoreSession(_ *tls.SessionState) error {
 	return nil
+}
+
+// curvePrefsFromStdlib converts []tls.CurveID → []utls.CurveID.
+// If the caller set explicit preferences, they are propagated as-is.
+// Otherwise a classical-only default is returned, intentionally excluding
+// X25519MLKEM768 (0x11ec) which was added in Go 1.24 / utls but is not
+// yet supported by many QUIC servers and causes silent handshake failures.
+func curvePrefsFromStdlib(prefs []tls.CurveID) []utls.CurveID {
+	if len(prefs) > 0 {
+		out := make([]utls.CurveID, len(prefs))
+		for i, c := range prefs {
+			out[i] = utls.CurveID(c)
+		}
+		return out
+	}
+	return []utls.CurveID{
+		utls.X25519,
+		utls.CurveP256,
+		utls.CurveP384,
+		utls.CurveP521,
+	}
 }
