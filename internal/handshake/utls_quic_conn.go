@@ -6,8 +6,6 @@ import (
 	"reflect"
 	"unsafe"
 
-	"github.com/sagernet/quic-go/internal/utils"
-
 	utls "github.com/metacubex/utls"
 )
 
@@ -36,10 +34,9 @@ type utlsQUICConn struct {
 	uconn              *utls.UConn
 	clientRandomPrefix []byte
 	clientRandomMask   []byte
-	logger             utils.Logger
 }
 
-func newUTLSQUICConn(tlsConf *tls.Config, id utls.ClientHelloID, prefix, mask []byte, logger utils.Logger) *utlsQUICConn {
+func newUTLSQUICConn(tlsConf *tls.Config, id utls.ClientHelloID, prefix, mask []byte) *utlsQUICConn {
 	cfg := &utls.QUICConfig{
 		TLSConfig: &utls.Config{
 			ServerName:             tlsConf.ServerName,
@@ -69,7 +66,6 @@ func newUTLSQUICConn(tlsConf *tls.Config, id utls.ClientHelloID, prefix, mask []
 		uconn:              uconn,
 		clientRandomPrefix: prefix,
 		clientRandomMask:   mask,
-		logger:             logger,
 	}
 }
 
