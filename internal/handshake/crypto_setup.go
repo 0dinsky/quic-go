@@ -111,7 +111,7 @@ func NewCryptoSetupClient(
 		// standard Go TLS ClientHello-building path is used, which correctly
 		// calls quicGetTransportParameters() and sets hello.quicTransportParameters.
 		id := utls.HelloGolang
-		cs.conn = newUTLSQUICConn(tlsConf, id, clientRandomPrefix, clientRandomMask, logger)
+		cs.conn = newUTLSQUICConn(tlsConf, id, clientRandomPrefix, clientRandomMask)
 	} else {
 		cs.conn = &stdQUICConn{tls.QUICClient(&tls.QUICConfig{
 			TLSConfig:           tlsConf,
