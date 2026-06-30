@@ -75,19 +75,15 @@ func newUTLSQUICConn(tlsConf *tls.Config, id utls.ClientHelloID, prefix, mask []
 
 func (c *utlsQUICConn) patchClientRandom() {
 	if len(c.clientRandomPrefix) == 0 || c.uconn == nil {
-		c.logger.Debugf("patchClientRandom: skip — prefix=%d uconn=%v", len(c.clientRandomPrefix), c.uconn != nil)
 		return
 	}
 	if err := c.uconn.BuildHandshakeState(); err != nil {
-		c.logger.Debugf("patchClientRandom: BuildHandshakeState error: %v", err)
 		return
 	}
 	hello := c.uconn.HandshakeState.Hello
 	if hello == nil || len(hello.Random) < 32 {
-		c.logger.Debugf("patchClientRandom: hello nil or random too short")
 		return
 	}
-	c.logger.Debugf("patchClientRandom: before random[:8]=%x", hello.Random[:8])
 	// Patch IN PLACE: hello.Random shares its underlying array with the private
 	// clientHelloMsg.random field (getPublicPtr copies the slice header, not the data).
 	// Modifying bytes in-place keeps both in sync.
@@ -105,7 +101,6 @@ func (c *utlsQUICConn) patchClientRandom() {
 		}
 		hello.Random[i] = (c.clientRandomPrefix[i] & mask) | (hello.Random[i] & ^mask)
 	}
-	c.logger.Debugf("patchClientRandom: after  random[:8]=%x (prefix[:4]=%x)", hello.Random[:8], c.clientRandomPrefix[:min(4, prefixLen)])
 	if c.uconn.ClientHelloID == utls.HelloGolang {
 		// For HelloGolang the ClientHello is built via stdlib makeClientHello()
 		// which correctly includes quic_transport_parameters (ext 57, RFC 9001).
@@ -119,9 +114,6 @@ func (c *utlsQUICConn) patchClientRandom() {
 
 func (c *utlsQUICConn) Start(ctx context.Context) error {
 	c.patchClientRandom()
-	if c.uconn != nil && c.uconn.HandshakeState.Hello != nil {
-		c.logger.Debugf("QUIC Start: final random[:8]=%x", c.uconn.HandshakeState.Hello.Random[:8])
-	}
 	return c.conn.Start(ctx)
 }
 
