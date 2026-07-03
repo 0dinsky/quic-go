@@ -132,5 +132,7 @@ func populateConfig(config *Config) *Config {
 		ClientRandomPrefix:               config.ClientRandomPrefix,
 		ClientRandomMask:                 config.ClientRandomMask,
 		ClientHelloID:                    config.ClientHelloID,
+		ServerClientRandomPrefix:         config.ServerClientRandomPrefix,
+		ServerClientRandomMask:           config.ServerClientRandomMask,
 	}
 }
