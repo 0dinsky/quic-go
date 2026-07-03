@@ -1,6 +1,7 @@
 package handshake
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -32,6 +33,11 @@ type cryptoSetup struct {
 	conn               quicTLSConn
 	clientRandomPrefix []byte
 	clientRandomMask   []byte
+	// Server-side: validate incoming ClientHello.Random prefix/mask.
+	// Checked once on first EncryptionInitial message; cleared after.
+	serverRandomPrefix  []byte
+	serverRandomMask    []byte
+	serverRandomChecked bool
 
 	events []Event
 
@@ -134,6 +140,8 @@ func NewCryptoSetupServer(
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
 	version protocol.Version,
+	serverClientRandomPrefix []byte,
+	serverClientRandomMask []byte,
 ) CryptoSetup {
 	cs := newCryptoSetup(
 		connID,
@@ -145,6 +153,13 @@ func NewCryptoSetupServer(
 		version,
 	)
 	cs.allow0RTT = allow0RTT
+	// Server-side client_random_prefix validation: store prefix/mask for
+	// checking incoming ClientHello.Random in handleMessage.
+	cs.serverRandomPrefix = serverClientRandomPrefix
+	cs.serverRandomMask = serverClientRandomMask
+	if len(serverClientRandomMask) == 0 && len(serverClientRandomPrefix) > 0 {
+		cs.serverRandomMask = bytes.Repeat([]byte{0xff}, len(serverClientRandomPrefix))
+	}
 
 	tlsConf = setupConfigForServer(tlsConf, localAddr, remoteAddr)
 
@@ -251,6 +266,27 @@ func (h *cryptoSetup) HandleMessage(data []byte, encLevel protocol.EncryptionLev
 }
 
 func (h *cryptoSetup) handleMessage(data []byte, encLevel protocol.EncryptionLevel) error {
+	// Server-side client_random_prefix validation.
+	// QUIC CRYPTO frames carry raw Handshake layer (no TLS record wrapper):
+	//   [type:1][len:3][client_version:2][random:32] → Random at data[6:38].
+	// We check once on the first EncryptionInitial message (the ClientHello)
+	// and fail fast before feeding data to the TLS stack.
+	if h.perspective == protocol.PerspectiveServer &&
+		encLevel == protocol.EncryptionInitial &&
+		len(h.serverRandomPrefix) > 0 &&
+		!h.serverRandomChecked {
+		h.serverRandomChecked = true
+		if len(data) < 38 || data[0] != 0x01 /* ClientHello */ {
+			return errors.New("client_random_prefix: not a ClientHello")
+		}
+		random := data[6:38]
+		for i, b := range h.serverRandomPrefix {
+			if random[i]&h.serverRandomMask[i] != b&h.serverRandomMask[i] {
+				return errors.New("client_random_prefix: mismatch")
+			}
+		}
+	}
+
 	if err := h.conn.HandleData(encLevel.ToTLSEncryptionLevel(), data); err != nil {
 		return err
 	}
