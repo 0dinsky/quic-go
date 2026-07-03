@@ -102,6 +102,11 @@ type Config struct {
 	// ClientHelloID sets the uTLS fingerprint when ClientRandomPrefix is used.
 	// Defaults to HelloChrome_Auto if not set.
 	ClientHelloID utls.ClientHelloID
+	// ServerClientRandomPrefix: server-side validation of incoming ClientHello.Random.
+	// QUIC connections whose Random does not match prefix/mask are rejected before
+	// the TLS handshake completes. Same format as ClientRandomPrefix.
+	ServerClientRandomPrefix []byte
+	ServerClientRandomMask   []byte
 	// GetConfigForClient is called for incoming connections.
 	// If the error is not nil, the connection attempt is refused.
 	GetConfigForClient func(info *ClientInfo) (*Config, error)
