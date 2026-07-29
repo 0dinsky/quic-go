@@ -107,6 +107,15 @@ type Config struct {
 	// the TLS handshake completes. Same format as ClientRandomPrefix.
 	ServerClientRandomPrefix []byte
 	ServerClientRandomMask   []byte
+	// ServerClientRandomVerify, если задан, заменяет собой статичную проверку
+	// ServerClientRandomPrefix/Mask выше: вызывается с 32 байтами
+	// ClientHello.Random и должен вернуть true, если они допустимы.
+	// Нужен для схем, где допустимое значение меняется со временем (например,
+	// ротация по HMAC(secret, time_window)) — statичный []byte в Config
+	// такое не выразит, а Config обычно живёт всё время работы сервера и не
+	// пересоздаётся на каждое соединение. Если задан оба — ServerClientRandomVerify
+	// имеет приоритет, статичные Prefix/Mask игнорируются.
+	ServerClientRandomVerify func(random [32]byte) bool
 	// GetConfigForClient is called for incoming connections.
 	// If the error is not nil, the connection attempt is refused.
 	GetConfigForClient func(info *ClientInfo) (*Config, error)

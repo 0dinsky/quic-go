@@ -37,6 +37,7 @@ type cryptoSetup struct {
 	// Checked once on first EncryptionInitial message; cleared after.
 	serverRandomPrefix  []byte
 	serverRandomMask    []byte
+	serverRandomVerify  func(random [32]byte) bool
 	serverRandomChecked bool
 
 	events []Event
@@ -142,6 +143,7 @@ func NewCryptoSetupServer(
 	version protocol.Version,
 	serverClientRandomPrefix []byte,
 	serverClientRandomMask []byte,
+	serverClientRandomVerify func(random [32]byte) bool,
 ) CryptoSetup {
 	cs := newCryptoSetup(
 		connID,
@@ -157,6 +159,7 @@ func NewCryptoSetupServer(
 	// checking incoming ClientHello.Random in handleMessage.
 	cs.serverRandomPrefix = serverClientRandomPrefix
 	cs.serverRandomMask = serverClientRandomMask
+	cs.serverRandomVerify = serverClientRandomVerify
 	if len(serverClientRandomMask) == 0 && len(serverClientRandomPrefix) > 0 {
 		cs.serverRandomMask = bytes.Repeat([]byte{0xff}, len(serverClientRandomPrefix))
 	}
@@ -273,16 +276,24 @@ func (h *cryptoSetup) handleMessage(data []byte, encLevel protocol.EncryptionLev
 	// and fail fast before feeding data to the TLS stack.
 	if h.perspective == protocol.PerspectiveServer &&
 		encLevel == protocol.EncryptionInitial &&
-		len(h.serverRandomPrefix) > 0 &&
+		(h.serverRandomVerify != nil || len(h.serverRandomPrefix) > 0) &&
 		!h.serverRandomChecked {
 		h.serverRandomChecked = true
 		if len(data) < 38 || data[0] != 0x01 /* ClientHello */ {
 			return errors.New("client_random_prefix: not a ClientHello")
 		}
 		random := data[6:38]
-		for i, b := range h.serverRandomPrefix {
-			if random[i]&h.serverRandomMask[i] != b&h.serverRandomMask[i] {
+		if h.serverRandomVerify != nil {
+			var randomArr [32]byte
+			copy(randomArr[:], random)
+			if !h.serverRandomVerify(randomArr) {
 				return errors.New("client_random_prefix: mismatch")
+			}
+		} else {
+			for i, b := range h.serverRandomPrefix {
+				if random[i]&h.serverRandomMask[i] != b&h.serverRandomMask[i] {
+					return errors.New("client_random_prefix: mismatch")
+				}
 			}
 		}
 	}

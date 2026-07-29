@@ -372,6 +372,7 @@ var newConnection = func(
 		s.version,
 		conf.ServerClientRandomPrefix,
 		conf.ServerClientRandomMask,
+		conf.ServerClientRandomVerify,
 	)
 	s.cryptoStreamHandler = cs
 	s.packer = newPacketPacker(srcConnID, s.connIDManager.Get, s.initialStream, s.handshakeStream, s.sentPacketHandler, s.retransmissionQueue, cs, s.framer, &s.receivedPacketHandler, s.datagramQueue, s.perspective)

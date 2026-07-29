@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"time"
 
+	utls "github.com/metacubex/utls"
+
 	"github.com/sagernet/quic-go/internal/protocol"
 	"github.com/sagernet/quic-go/quicvarint"
 )
@@ -105,6 +107,19 @@ func populateConfig(config *Config) *Config {
 		initialPacketSize = protocol.InitialPacketSize
 	}
 
+	// Если задан client_random_prefix (не важно, статичный или деривированный
+	// снаружи из ротирующего секрета — сюда он приходит уже готовыми байтами),
+	// а ClientHelloID явно не выбран — включаем HelloChrome_Auto автоматически:
+	// иначе ClientHello.Random содержит "пришитый" фиксированный паттерн, а
+	// весь остальной ClientHello при этом остаётся стоковым Go-отпечатком —
+	// заметное несоответствие для DPI, делающего JA3/JA4-фингерпринтинг.
+	// Если ClientHelloID уже выбран явно (не HelloGolang) — ничего не трогаем,
+	// это осознанный выбор вызывающей стороны.
+	clientHelloID := config.ClientHelloID
+	if len(config.ClientRandomPrefix) > 0 && clientHelloID == utls.HelloGolang {
+		clientHelloID = utls.HelloChrome_Auto
+	}
+
 	return &Config{
 		GetConfigForClient:               config.GetConfigForClient,
 		Versions:                         versions,
@@ -131,8 +146,9 @@ func populateConfig(config *Config) *Config {
 		DisablePathManager:               config.DisablePathManager,
 		ClientRandomPrefix:               config.ClientRandomPrefix,
 		ClientRandomMask:                 config.ClientRandomMask,
-		ClientHelloID:                    config.ClientHelloID,
+		ClientHelloID:                    clientHelloID,
 		ServerClientRandomPrefix:         config.ServerClientRandomPrefix,
 		ServerClientRandomMask:           config.ServerClientRandomMask,
+		ServerClientRandomVerify:         config.ServerClientRandomVerify,
 	}
 }
