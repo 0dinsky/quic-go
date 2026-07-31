@@ -137,6 +137,10 @@ type packetPacker struct {
 	numNonAckElicitingAcks int
 
 	peekTimes int
+
+	// extraPaddingMin/extraPaddingMax — see Config.ExtraPacketPaddingMin/Max.
+	extraPaddingMin protocol.ByteCount
+	extraPaddingMax protocol.ByteCount
 }
 
 const DatagramFrameMaxPeekTimes = 10
@@ -155,6 +159,8 @@ func newPacketPacker(
 	acks ackFrameSource,
 	datagramQueue *datagramQueue,
 	perspective protocol.Perspective,
+	extraPaddingMin int,
+	extraPaddingMax int,
 ) *packetPacker {
 	var b [16]byte
 	_, _ = crand.Read(b[:])
@@ -172,7 +178,33 @@ func newPacketPacker(
 		acks:                acks,
 		rand:                *rand.New(rand.NewPCG(binary.BigEndian.Uint64(b[:8]), binary.BigEndian.Uint64(b[8:]))),
 		pnManager:           packetNumberManager,
+		extraPaddingMin:     protocol.ByteCount(extraPaddingMin),
+		extraPaddingMax:     protocol.ByteCount(extraPaddingMax),
 	}
+}
+
+// pickExtraPacketPadding returns a random extra padding length (in bytes),
+// uniformly sampled from [extraPaddingMin, extraPaddingMax] (see
+// Config.ExtraPacketPaddingMin/Max), clamped so that currentSize+result
+// never exceeds maxPacketSize — padding only fills room that's already
+// available below the packet's size limit, it never causes fragmentation or
+// a "packet too large" error.
+func (p *packetPacker) pickExtraPacketPadding(currentSize, maxPacketSize protocol.ByteCount) protocol.ByteCount {
+	if p.extraPaddingMax <= 0 {
+		return 0
+	}
+	room := maxPacketSize - currentSize
+	if room <= 0 {
+		return 0
+	}
+	length := p.extraPaddingMin
+	if p.extraPaddingMax > p.extraPaddingMin {
+		length += protocol.ByteCount(p.rand.IntN(int(p.extraPaddingMax-p.extraPaddingMin) + 1))
+	}
+	if length > room {
+		return room
+	}
+	return length
 }
 
 // PackConnectionClose packs a packet that closes the connection with a transport error.
@@ -455,7 +487,11 @@ func (p *packetPacker) PackCoalescedPacket(onlyAck bool, maxSize protocol.ByteCo
 		}
 		packet.longHdrPackets = append(packet.longHdrPackets, longHdrPacket)
 	} else if oneRTTPayload.length > 0 {
-		shp, err := p.appendShortHeaderPacket(buffer, connID, oneRTTPacketNumber, oneRTTPacketNumberLen, kp, oneRTTPayload, 0, maxSize, oneRTTSealer, false, v)
+		// size already accounts for this 1-RTT packet's un-padded length
+		// (added a few lines above), so it's the right "currentSize" to bound
+		// extra padding against the coalesced datagram's maxSize budget.
+		padding := p.pickExtraPacketPadding(size, maxSize)
+		shp, err := p.appendShortHeaderPacket(buffer, connID, oneRTTPacketNumber, oneRTTPacketNumberLen, kp, oneRTTPayload, padding, maxSize, oneRTTSealer, false, v)
 		if err != nil {
 			buffer.Release()
 			return nil, err
@@ -499,7 +535,9 @@ func (p *packetPacker) appendPacket(
 	}
 	kp := sealer.KeyPhase()
 
-	return p.appendShortHeaderPacket(buf, connID, pn, pnLen, kp, pl, 0, maxPacketSize, sealer, false, v)
+	currentSize := p.shortHeaderPacketLength(connID, pnLen, pl) + protocol.ByteCount(sealer.Overhead())
+	padding := p.pickExtraPacketPadding(currentSize, maxPacketSize)
+	return p.appendShortHeaderPacket(buf, connID, pn, pnLen, kp, pl, padding, maxPacketSize, sealer, false, v)
 }
 
 func (p *packetPacker) maybeGetCryptoPacket(
@@ -805,7 +843,9 @@ func (p *packetPacker) packPTOProbePacket1RTT(maxPacketSize protocol.ByteCount, 
 	}
 	buffer := getPacketBuffer()
 	packet := &coalescedPacket{buffer: buffer}
-	shp, err := p.appendShortHeaderPacket(buffer, connID, pn, pnLen, kp, pl, 0, maxPacketSize, s, false, v)
+	currentSize := p.shortHeaderPacketLength(connID, pnLen, pl) + protocol.ByteCount(s.Overhead())
+	padding := p.pickExtraPacketPadding(currentSize, maxPacketSize)
+	shp, err := p.appendShortHeaderPacket(buffer, connID, pn, pnLen, kp, pl, padding, maxPacketSize, s, false, v)
 	if err != nil {
 		buffer.Release()
 		return nil, err

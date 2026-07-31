@@ -211,6 +211,24 @@ type Config struct {
 	// DisablePathManager disables path manager.
 	// for hysteria2 port hopping, direct change remote address without connection migration logic
 	DisablePathManager bool
+
+	// ExtraPacketPaddingMin/ExtraPacketPaddingMax define extra random padding
+	// added to outgoing 1-RTT (post-handshake, application-data) packets, on
+	// top of whatever padding the packet already needed. The goal is to break
+	// the correlation between the size of application data and the size of
+	// packets observed on the wire: a passive DPI classifier can otherwise
+	// fingerprint a VPN/proxy protocol purely from packet-size statistics,
+	// without decrypting anything — padding lives inside the encrypted QUIC
+	// packet, so it costs nothing in terms of confidentiality.
+	//
+	// For every packet, an extra padding length is chosen uniformly at
+	// random within [ExtraPacketPaddingMin, ExtraPacketPaddingMax] (bytes),
+	// bounded by how much room is left below the packet's size limit —
+	// padding never forces fragmentation or exceeds the path MTU.
+	//
+	// Zero/zero (the default) disables this padding.
+	ExtraPacketPaddingMin int
+	ExtraPacketPaddingMax int
 }
 
 // ClientInfo contains information about an incoming connection attempt.

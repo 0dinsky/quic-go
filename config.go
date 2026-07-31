@@ -53,6 +53,12 @@ func validateConfig(config *Config) error {
 			return fmt.Errorf("invalid QUIC version: %s", v)
 		}
 	}
+	if config.ExtraPacketPaddingMin < 0 {
+		return fmt.Errorf("ExtraPacketPaddingMin must not be negative")
+	}
+	if config.ExtraPacketPaddingMax < config.ExtraPacketPaddingMin {
+		return fmt.Errorf("ExtraPacketPaddingMax must not be smaller than ExtraPacketPaddingMin")
+	}
 	return nil
 }
 
@@ -150,5 +156,7 @@ func populateConfig(config *Config) *Config {
 		ServerClientRandomPrefix:         config.ServerClientRandomPrefix,
 		ServerClientRandomMask:           config.ServerClientRandomMask,
 		ServerClientRandomVerify:         config.ServerClientRandomVerify,
+		ExtraPacketPaddingMin:            config.ExtraPacketPaddingMin,
+		ExtraPacketPaddingMax:            config.ExtraPacketPaddingMax,
 	}
 }
