@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"time"
 
-	utls "github.com/metacubex/utls"
-
 	"github.com/sagernet/quic-go/internal/protocol"
 	"github.com/sagernet/quic-go/quicvarint"
 )
@@ -52,6 +50,18 @@ func validateConfig(config *Config) error {
 		if !protocol.IsValidVersion(v) {
 			return fmt.Errorf("invalid QUIC version: %s", v)
 		}
+	}
+	if len(config.ClientRandomPrefix) > 32 {
+		return fmt.Errorf("ClientRandomPrefix must not exceed 32 bytes")
+	}
+	if len(config.ClientRandomMask) > 32 {
+		return fmt.Errorf("ClientRandomMask must not exceed 32 bytes")
+	}
+	if len(config.ServerClientRandomPrefix) > 32 {
+		return fmt.Errorf("ServerClientRandomPrefix must not exceed 32 bytes")
+	}
+	if len(config.ServerClientRandomMask) > 32 {
+		return fmt.Errorf("ServerClientRandomMask must not exceed 32 bytes")
 	}
 	if config.ExtraPacketPaddingMin < 0 {
 		return fmt.Errorf("ExtraPacketPaddingMin must not be negative")
@@ -112,18 +122,24 @@ func populateConfig(config *Config) *Config {
 	if initialPacketSize == 0 {
 		initialPacketSize = protocol.InitialPacketSize
 	}
-
-	// Если задан client_random_prefix (не важно, статичный или деривированный
-	// снаружи из ротирующего секрета — сюда он приходит уже готовыми байтами),
-	// а ClientHelloID явно не выбран — включаем HelloChrome_Auto автоматически:
-	// иначе ClientHello.Random содержит "пришитый" фиксированный паттерн, а
-	// весь остальной ClientHello при этом остаётся стоковым Go-отпечатком —
-	// заметное несоответствие для DPI, делающего JA3/JA4-фингерпринтинг.
-	// Если ClientHelloID уже выбран явно (не HelloGolang) — ничего не трогаем,
-	// это осознанный выбор вызывающей стороны.
-	clientHelloID := config.ClientHelloID
-	if len(config.ClientRandomPrefix) > 0 && clientHelloID == utls.HelloGolang {
-		clientHelloID = utls.HelloChrome_Auto
+	enableDatagrams := config.EnableDatagrams
+	omitMaxDatagramFrameSize := config.OmitMaxDatagramFrameSize
+	if config.ChromeParrot {
+		// Chrome always advertises DATAGRAM support, so enable it and never omit
+		// the transport parameter; leaving it out would be one parameter short of
+		// Chrome's set.
+		enableDatagrams = true
+		omitMaxDatagramFrameSize = false
+		// Chrome pins these, so anything the caller asked for is overridden.
+		idleTimeout = chromeMaxIdleTimeout
+		initialStreamReceiveWindow = chromeInitialMaxStreamData
+		initialConnectionReceiveWindow = chromeInitialMaxData
+		maxIncomingStreams = chromeMaxIncomingStreams
+		maxIncomingUniStreams = chromeMaxIncomingUniStreams
+		initialPacketSize = chromeInitialPacketSize
+		// The auto-tuning ceilings must not sit below the starting windows.
+		maxStreamReceiveWindow = max(maxStreamReceiveWindow, initialStreamReceiveWindow)
+		maxConnectionReceiveWindow = max(maxConnectionReceiveWindow, initialConnectionReceiveWindow)
 	}
 
 	return &Config{
@@ -140,8 +156,8 @@ func populateConfig(config *Config) *Config {
 		MaxIncomingStreams:               maxIncomingStreams,
 		MaxIncomingUniStreams:            maxIncomingUniStreams,
 		TokenStore:                       config.TokenStore,
-		EnableDatagrams:                  config.EnableDatagrams,
-		OmitMaxDatagramFrameSize:         config.OmitMaxDatagramFrameSize,
+		EnableDatagrams:                  enableDatagrams,
+		OmitMaxDatagramFrameSize:         omitMaxDatagramFrameSize,
 		AssumePeerMaxDatagramFrameSize:   config.AssumePeerMaxDatagramFrameSize,
 		InitialPacketSize:                initialPacketSize,
 		DisablePathMTUDiscovery:          config.DisablePathMTUDiscovery,
@@ -150,9 +166,9 @@ func populateConfig(config *Config) *Config {
 		Tracer:                           config.Tracer,
 		MaxDatagramFrameSize:             config.MaxDatagramFrameSize,
 		DisablePathManager:               config.DisablePathManager,
+		ChromeParrot:                     config.ChromeParrot,
 		ClientRandomPrefix:               config.ClientRandomPrefix,
 		ClientRandomMask:                 config.ClientRandomMask,
-		ClientHelloID:                    clientHelloID,
 		ServerClientRandomPrefix:         config.ServerClientRandomPrefix,
 		ServerClientRandomMask:           config.ServerClientRandomMask,
 		ServerClientRandomVerify:         config.ServerClientRandomVerify,

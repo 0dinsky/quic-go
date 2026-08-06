@@ -25,7 +25,7 @@ func DialAddr(ctx context.Context, addr string, tlsConf *tls.Config, conf *Confi
 	if err != nil {
 		return nil, err
 	}
-	tr, err := setupTransport(udpConn, tlsConf, true)
+	tr, err := setupTransport(udpConn, tlsConf, conf, true)
 	if err != nil {
 		return nil, err
 	}
@@ -48,7 +48,7 @@ func DialAddrEarly(ctx context.Context, addr string, tlsConf *tls.Config, conf *
 	if err != nil {
 		return nil, err
 	}
-	tr, err := setupTransport(udpConn, tlsConf, true)
+	tr, err := setupTransport(udpConn, tlsConf, conf, true)
 	if err != nil {
 		return nil, err
 	}
@@ -63,7 +63,7 @@ func DialAddrEarly(ctx context.Context, addr string, tlsConf *tls.Config, conf *
 // DialEarly establishes a new 0-RTT QUIC connection to a server using a net.PacketConn.
 // See [Dial] for more details.
 func DialEarly(ctx context.Context, c net.PacketConn, addr net.Addr, tlsConf *tls.Config, conf *Config) (*Conn, error) {
-	dl, err := setupTransport(c, tlsConf, false)
+	dl, err := setupTransport(c, tlsConf, conf, false)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +85,7 @@ func DialEarly(ctx context.Context, c net.PacketConn, addr net.Addr, tlsConf *tl
 // which offers configuration options for a more fine-grained control of the connection establishment,
 // including reusing the underlying UDP socket for multiple QUIC connections.
 func Dial(ctx context.Context, c net.PacketConn, addr net.Addr, tlsConf *tls.Config, conf *Config) (*Conn, error) {
-	dl, err := setupTransport(c, tlsConf, false)
+	dl, err := setupTransport(c, tlsConf, conf, false)
 	if err != nil {
 		return nil, err
 	}
@@ -97,13 +97,71 @@ func Dial(ctx context.Context, c net.PacketConn, addr net.Addr, tlsConf *tls.Con
 	return conn, nil
 }
 
-func setupTransport(c net.PacketConn, tlsConf *tls.Config, createdPacketConn bool) (*Transport, error) {
+// DialConn establishes a new QUIC connection to a server over a connected packet-oriented
+// net.Conn, such as a conn returned by net.DialUDP. The remote address is taken from the
+// conn, and every optimization enabled for a syscall.Conn-capable net.PacketConn is enabled
+// here as well, driven by the file descriptor alone.
+func DialConn(ctx context.Context, c net.Conn, tlsConf *tls.Config, conf *Config) (*Conn, error) {
+	dl, err := setupTransportConn(c, tlsConf, conf)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := dl.Dial(ctx, c.RemoteAddr(), tlsConf, conf)
+	if err != nil {
+		dl.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+// DialEarlyConn establishes a new 0-RTT QUIC connection to a server over a connected
+// packet-oriented net.Conn. See [DialConn] for more details.
+func DialEarlyConn(ctx context.Context, c net.Conn, tlsConf *tls.Config, conf *Config) (*Conn, error) {
+	dl, err := setupTransportConn(c, tlsConf, conf)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := dl.DialEarly(ctx, c.RemoteAddr(), tlsConf, conf)
+	if err != nil {
+		dl.Close()
+		return nil, err
+	}
+	return conn, nil
+}
+
+func setupTransportConn(c net.Conn, tlsConf *tls.Config, conf *Config) (*Transport, error) {
 	if tlsConf == nil {
 		return nil, errors.New("quic: tls.Config not set")
 	}
-	return &Transport{
+	conn, err := wrapNetConn(c)
+	if err != nil {
+		return nil, err
+	}
+	tr := &Transport{
+		Conn:        conn.(net.PacketConn),
+		isSingleUse: true,
+	}
+	if conf != nil && conf.ChromeParrot {
+		tr.ConnectionIDGenerator = ZeroLengthConnectionIDGenerator{}
+	}
+	return tr, nil
+}
+
+func setupTransport(c net.PacketConn, tlsConf *tls.Config, conf *Config, createdPacketConn bool) (*Transport, error) {
+	if tlsConf == nil {
+		return nil, errors.New("quic: tls.Config not set")
+	}
+	tr := &Transport{
 		Conn:        c,
 		createdConn: createdPacketConn,
 		isSingleUse: true,
-	}, nil
+	}
+	// The zero-length source connection ID a Chrome-parroting client uses can only
+	// be chosen here, because the Transport parses every incoming packet's
+	// destination connection ID at one fixed length. These Transports are single
+	// use, which is the one connection at a time that choice permits.
+	if conf != nil && conf.ChromeParrot {
+		tr.ConnectionIDGenerator = ZeroLengthConnectionIDGenerator{}
+	}
+	return tr, nil
 }

@@ -8,7 +8,6 @@ import (
 	"slices"
 	"time"
 
-	utls "github.com/metacubex/utls"
 	"github.com/sagernet/quic-go/internal/handshake"
 	"github.com/sagernet/quic-go/internal/protocol"
 	"github.com/sagernet/quic-go/qlogwriter"
@@ -59,6 +58,12 @@ type TokenStore interface {
 // when the server rejects a 0-RTT connection attempt.
 var Err0RTTRejected = errors.New("0-RTT rejected")
 
+// ErrWouldBlock is returned by [SendStream.TryWriteAll] if the entire slice can't be queued immediately.
+var ErrWouldBlock = errors.New("operation would block")
+
+// ErrWriteLimitReached is returned by [SendStream.WriteWithLimit] when its limiter prevents accepting the entire slice.
+var ErrWriteLimitReached = errors.New("write limit reached")
+
 // QUICVersionContextKey can be used to find out the QUIC version of a TLS handshake from the
 // context returned by tls.Config.ClientInfo.Context.
 var QUICVersionContextKey = handshake.QUICVersionContextKey
@@ -95,27 +100,6 @@ type ConnectionIDGenerator interface {
 
 // Config contains all configuration data needed for a QUIC server or client.
 type Config struct {
-	// ClientRandomPrefix is applied to TLS ClientHello.Random in QUIC handshake.
-	// Used for TrustTunnel client_random_prefix authentication.
-	ClientRandomPrefix []byte
-	ClientRandomMask   []byte
-	// ClientHelloID sets the uTLS fingerprint when ClientRandomPrefix is used.
-	// Defaults to HelloChrome_Auto if not set.
-	ClientHelloID utls.ClientHelloID
-	// ServerClientRandomPrefix: server-side validation of incoming ClientHello.Random.
-	// QUIC connections whose Random does not match prefix/mask are rejected before
-	// the TLS handshake completes. Same format as ClientRandomPrefix.
-	ServerClientRandomPrefix []byte
-	ServerClientRandomMask   []byte
-	// ServerClientRandomVerify, если задан, заменяет собой статичную проверку
-	// ServerClientRandomPrefix/Mask выше: вызывается с 32 байтами
-	// ClientHello.Random и должен вернуть true, если они допустимы.
-	// Нужен для схем, где допустимое значение меняется со временем (например,
-	// ротация по HMAC(secret, time_window)) — statичный []byte в Config
-	// такое не выразит, а Config обычно живёт всё время работы сервера и не
-	// пересоздаётся на каждое соединение. Если задан оба — ServerClientRandomVerify
-	// имеет приоритет, статичные Prefix/Mask игнорируются.
-	ServerClientRandomVerify func(random [32]byte) bool
 	// GetConfigForClient is called for incoming connections.
 	// If the error is not nil, the connection attempt is refused.
 	GetConfigForClient func(info *ClientInfo) (*Config, error)
@@ -201,7 +185,7 @@ type Config struct {
 	// as supporting DATAGRAM frames up to this size. This is a non-standard extension.
 	AssumePeerMaxDatagramFrameSize int64
 	// Enable QUIC Stream Resets with Partial Delivery.
-	// See https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset-07.
+	// See https://datatracker.ietf.org/doc/html/draft-ietf-quic-reliable-stream-reset-09.
 	EnableStreamResetPartialDelivery bool
 
 	Tracer func(ctx context.Context, isClient bool, connID ConnectionID) qlogwriter.Trace
@@ -212,21 +196,32 @@ type Config struct {
 	// for hysteria2 port hopping, direct change remote address without connection migration logic
 	DisablePathManager bool
 
-	// ExtraPacketPaddingMin/ExtraPacketPaddingMax define extra random padding
-	// added to outgoing 1-RTT (post-handshake, application-data) packets, on
-	// top of whatever padding the packet already needed. The goal is to break
-	// the correlation between the size of application data and the size of
-	// packets observed on the wire: a passive DPI classifier can otherwise
-	// fingerprint a VPN/proxy protocol purely from packet-size statistics,
-	// without decrypting anything — padding lives inside the encrypted QUIC
-	// packet, so it costs nothing in terms of confidentiality.
+	// ChromeParrot makes the client's QUIC handshake look like Google Chrome's.
+	// It overrides the flow control windows, stream limits, idle timeout and
+	// packet size with Chrome's values, encodes the transport parameters the way
+	// Chrome does (see wire.marshalChrome), and applies Chrome's chaos
+	// protection to the Initial packets.
 	//
-	// For every packet, an extra padding length is chosen uniformly at
-	// random within [ExtraPacketPaddingMin, ExtraPacketPaddingMax] (bytes),
-	// bounded by how much room is left below the packet's size limit —
-	// padding never forces fragmentation or exceeds the path MTU.
-	//
-	// Zero/zero (the default) disables this padding.
+	// Client side only; it has no effect on a listener. Because it pins the
+	// values above, settings that conflict with Chrome's are ignored.
+	ChromeParrot bool
+
+	// ClientRandomPrefix sets the leading bytes of the TLS ClientHello random sent
+	// by a client. ClientRandomMask optionally selects which bits are replaced; a
+	// missing mask means all bits. This applies to both the standard TLS client and
+	// ChromeParrot.
+	ClientRandomPrefix []byte
+	ClientRandomMask   []byte
+
+	// ServerClientRandomPrefix and ServerClientRandomMask validate the leading
+	// bytes of an incoming TLS ClientHello random. ServerClientRandomVerify, when
+	// set, takes precedence and receives the complete 32-byte random.
+	ServerClientRandomPrefix []byte
+	ServerClientRandomMask   []byte
+	ServerClientRandomVerify func(random [32]byte) bool
+
+	// ExtraPacketPaddingMin and ExtraPacketPaddingMax add a random number of
+	// PADDING bytes to outgoing packets when room is available.
 	ExtraPacketPaddingMin int
 	ExtraPacketPaddingMax int
 }

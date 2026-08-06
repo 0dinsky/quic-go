@@ -1,7 +1,6 @@
 package handshake
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -12,8 +11,6 @@ import (
 	"time"
 
 	"github.com/sagernet/quic-go/internal/protocol"
-
-	utls "github.com/metacubex/utls"
 	"github.com/sagernet/quic-go/internal/qerr"
 	"github.com/sagernet/quic-go/internal/utils"
 	"github.com/sagernet/quic-go/internal/wire"
@@ -29,16 +26,8 @@ var QUICVersionContextKey = &quicVersionContextKey{}
 const clientSessionStateRevision = 5
 
 type cryptoSetup struct {
-	tlsConf            *tls.Config
-	conn               quicTLSConn
-	clientRandomPrefix []byte
-	clientRandomMask   []byte
-	// Server-side: validate incoming ClientHello.Random prefix/mask.
-	// Checked once on first EncryptionInitial message; cleared after.
-	serverRandomPrefix  []byte
-	serverRandomMask    []byte
-	serverRandomVerify  func(random [32]byte) bool
-	serverRandomChecked bool
+	tlsConf *tls.Config
+	conn    tlsQUICConn
 
 	events []Event
 
@@ -70,6 +59,11 @@ type cryptoSetup struct {
 
 	used0RTT atomic.Bool
 
+	serverRandomPrefix  []byte
+	serverRandomMask    []byte
+	serverRandomVerify  func(random [32]byte) bool
+	serverRandomChecked bool
+
 	aead          *updatableAEAD
 	has1RTTSealer bool
 	has1RTTOpener bool
@@ -78,19 +72,25 @@ type cryptoSetup struct {
 var _ CryptoSetup = &cryptoSetup{}
 
 // NewCryptoSetupClient creates a new crypto setup for the client
+// chromeParrot makes the client emit Chrome's TLS ClientHello via uTLS instead of
+// crypto/tls. It forces enable0RTT off: see newUTLSQUICClient for why resumption
+// can't be carried across the two TLS stacks.
 func NewCryptoSetupClient(
 	connID protocol.ConnectionID,
 	tp *wire.TransportParameters,
 	tlsConf *tls.Config,
 	enable0RTT bool,
+	chromeParrot bool,
+	clientRandomPrefix []byte,
+	clientRandomMask []byte,
+	serverRandomPrefix []byte,
+	serverRandomMask []byte,
+	serverRandomVerify func(random [32]byte) bool,
 	rttStats *utils.RTTStats,
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
 	version protocol.Version,
-	clientRandomPrefix []byte,
-	clientRandomMask []byte,
-	clientHelloID utls.ClientHelloID,
-) CryptoSetup {
+) (CryptoSetup, error) {
 	cs := newCryptoSetup(
 		connID,
 		tp,
@@ -101,33 +101,30 @@ func NewCryptoSetupClient(
 		version,
 	)
 
-	tlsConf = tlsConf.Clone()
-	tlsConf.MinVersion = tls.VersionTLS13
+	tlsConf = setupConfigForClient(tlsConf)
 	cs.tlsConf = tlsConf
-	cs.allow0RTT = enable0RTT
-	cs.clientRandomPrefix = clientRandomPrefix
-	cs.clientRandomMask = clientRandomMask
+	cs.allow0RTT = enable0RTT && !chromeParrot
+	cs.serverRandomPrefix = serverRandomPrefix
+	cs.serverRandomMask = serverRandomMask
+	cs.serverRandomVerify = serverRandomVerify
+	_ = clientRandomPrefix
+	_ = clientRandomMask
 
-	if len(clientRandomPrefix) > 0 {
-		// uTLS fingerprint presets (Chrome/Firefox/etc.) do not populate the
-		// quic_transport_parameters (57) extension for QUIC ClientHellos —
-		// this code path is explicitly disabled upstream in utls
-		// ("not ready yet"). Using a fingerprint preset here results in a
-		// ClientHello missing extension 57, which silently breaks the QUIC
-		// handshake (no packets are ever sent). Force HelloGolang so the
-		// standard Go TLS ClientHello-building path is used, which correctly
-		// calls quicGetTransportParameters() and sets hello.quicTransportParameters.
-		id := utls.HelloGolang
-		cs.conn = newUTLSQUICConn(tlsConf, id, clientRandomPrefix, clientRandomMask)
+	if chromeParrot {
+		conn, err := newUTLSQUICClient(tlsConf)
+		if err != nil {
+			return nil, err
+		}
+		cs.conn = conn
 	} else {
-		cs.conn = &stdQUICConn{tls.QUICClient(&tls.QUICConfig{
+		cs.conn = tls.QUICClient(&tls.QUICConfig{
 			TLSConfig:           tlsConf,
 			EnableSessionEvents: true,
-		})}
+		})
 	}
 	cs.conn.SetTransportParameters(cs.ourParams.Marshal(protocol.PerspectiveClient))
 
-	return cs
+	return cs, nil
 }
 
 // NewCryptoSetupServer creates a new crypto setup for the server
@@ -141,9 +138,6 @@ func NewCryptoSetupServer(
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
 	version protocol.Version,
-	serverClientRandomPrefix []byte,
-	serverClientRandomMask []byte,
-	serverClientRandomVerify func(random [32]byte) bool,
 ) CryptoSetup {
 	cs := newCryptoSetup(
 		connID,
@@ -155,22 +149,11 @@ func NewCryptoSetupServer(
 		version,
 	)
 	cs.allow0RTT = allow0RTT
-	// Server-side client_random_prefix validation: store prefix/mask for
-	// checking incoming ClientHello.Random in handleMessage.
-	cs.serverRandomPrefix = serverClientRandomPrefix
-	cs.serverRandomMask = serverClientRandomMask
-	cs.serverRandomVerify = serverClientRandomVerify
-	if len(serverClientRandomMask) == 0 && len(serverClientRandomPrefix) > 0 {
-		cs.serverRandomMask = bytes.Repeat([]byte{0xff}, len(serverClientRandomPrefix))
-	}
 
 	tlsConf = setupConfigForServer(tlsConf, localAddr, remoteAddr)
 
 	cs.tlsConf = tlsConf
-	cs.conn = &stdQUICConn{tls.QUICServer(&tls.QUICConfig{
-		TLSConfig:           tlsConf,
-		EnableSessionEvents: true,
-	})}
+	cs.conn = tls.QUICServer(getQUICConfig(tlsConf, localAddr, remoteAddr))
 	return cs
 }
 
@@ -269,35 +252,30 @@ func (h *cryptoSetup) HandleMessage(data []byte, encLevel protocol.EncryptionLev
 }
 
 func (h *cryptoSetup) handleMessage(data []byte, encLevel protocol.EncryptionLevel) error {
-	// Server-side client_random_prefix validation.
-	// QUIC CRYPTO frames carry raw Handshake layer (no TLS record wrapper):
-	//   [type:1][len:3][client_version:2][random:32] → Random at data[6:38].
-	// We check once on the first EncryptionInitial message (the ClientHello)
-	// and fail fast before feeding data to the TLS stack.
-	if h.perspective == protocol.PerspectiveServer &&
-		encLevel == protocol.EncryptionInitial &&
-		(h.serverRandomVerify != nil || len(h.serverRandomPrefix) > 0) &&
-		!h.serverRandomChecked {
+	if h.perspective == protocol.PerspectiveServer && encLevel == protocol.EncryptionInitial &&
+		(h.serverRandomVerify != nil || len(h.serverRandomPrefix) > 0) && !h.serverRandomChecked {
 		h.serverRandomChecked = true
-		if len(data) < 38 || data[0] != 0x01 /* ClientHello */ {
-			return errors.New("client_random_prefix: not a ClientHello")
+		if len(data) < 38 || data[0] != 0x01 {
+			return errors.New("client random validation: initial CRYPTO data is not a complete ClientHello")
 		}
-		random := data[6:38]
+		var random [32]byte
+		copy(random[:], data[6:38])
 		if h.serverRandomVerify != nil {
-			var randomArr [32]byte
-			copy(randomArr[:], random)
-			if !h.serverRandomVerify(randomArr) {
-				return errors.New("client_random_prefix: mismatch")
+			if !h.serverRandomVerify(random) {
+				return errors.New("client random validation: mismatch")
 			}
 		} else {
-			for i, b := range h.serverRandomPrefix {
-				if random[i]&h.serverRandomMask[i] != b&h.serverRandomMask[i] {
-					return errors.New("client_random_prefix: mismatch")
+			for i, expected := range h.serverRandomPrefix {
+				mask := byte(0xff)
+				if i < len(h.serverRandomMask) {
+					mask = h.serverRandomMask[i]
+				}
+				if random[i]&mask != expected&mask {
+					return errors.New("client random validation: mismatch")
 				}
 			}
 		}
 	}
-
 	if err := h.conn.HandleData(encLevel.ToTLSEncryptionLevel(), data); err != nil {
 		return err
 	}
@@ -365,6 +343,8 @@ func (h *cryptoSetup) handleEvent(ev tls.QUICEvent) (err error) {
 			ev.SessionState.EarlyData = allowEarlyData
 		}
 		return nil
+	case quicErrorEvent:
+		return extractQUICEventError(ev)
 	default:
 		// Unknown events should be ignored.
 		// crypto/tls will ensure that this is safe to do.
