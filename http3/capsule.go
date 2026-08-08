@@ -34,6 +34,18 @@ func NewCapsuleParser(r io.Reader) *CapsuleParser {
 	return &CapsuleParser{r: quicvarint.NewReader(r)}
 }
 
+// ParseCapsule is kept for compatibility with clients written against the
+// pre-CapsuleParser API. The returned reader must be consumed before parsing
+// the next capsule from the underlying stream.
+func ParseCapsule(r quicvarint.Reader) (CapsuleType, io.Reader, error) {
+	parser := NewCapsuleParser(r)
+	capsuleType, capsuleReader, err := parser.Next()
+	if err != nil {
+		return 0, nil, err
+	}
+	return capsuleType, capsuleReader, nil
+}
+
 var (
 	errReaderInvalid      = errors.New("http3: capsule reader is no longer valid")
 	errCapsuleNotConsumed = errors.New("http3: previous capsule was not fully consumed")
