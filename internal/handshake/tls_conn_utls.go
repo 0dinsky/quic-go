@@ -49,13 +49,14 @@ func newUTLSQUICClient(tlsConf *tls.Config) (*utlsQUICConn, error) {
 // uTLS ships no converter, so this copies field by field. Any field that cannot
 // be carried across is a hard error rather than a silent omission: dropping
 // something like VerifyConnection would quietly weaken certificate validation.
+//
+// VerifyConnection is supported via a thin adapter that converts
+// utls.ConnectionState → tls.ConnectionState (same layout for the fields we
+// care about). This is required for sing-box cert_domain and similar callers
+// that install a custom verifier when ChromeParrot is enabled.
 func utlsConfigFromStd(c *tls.Config) (*utls.Config, error) {
 	if c == nil {
 		return &utls.Config{MinVersion: utls.VersionTLS13}, nil
-	}
-	if c.VerifyConnection != nil {
-		// Takes a crypto/tls ConnectionState, which uTLS will never produce.
-		return nil, errors.New("quic: tls.Config.VerifyConnection is not supported with ChromeParrot")
 	}
 	if c.GetConfigForClient != nil || len(c.Certificates) > 0 || c.GetCertificate != nil {
 		return nil, errors.New("quic: server-side tls.Config fields are not supported with ChromeParrot")
@@ -75,6 +76,25 @@ func utlsConfigFromStd(c *tls.Config) (*utls.Config, error) {
 		MaxVersion: utls.VersionTLS13,
 		// Resumption is off; see newUTLSQUICClient.
 		SessionTicketsDisabled: true,
+	}
+
+	if c.VerifyConnection != nil {
+		verify := c.VerifyConnection
+		uc.VerifyConnection = func(cs utls.ConnectionState) error {
+			return verify(tls.ConnectionState{
+				Version:                     cs.Version,
+				HandshakeComplete:           cs.HandshakeComplete,
+				DidResume:                   cs.DidResume,
+				CipherSuite:                 cs.CipherSuite,
+				NegotiatedProtocol:          cs.NegotiatedProtocol,
+				NegotiatedProtocolIsMutual:  true,
+				ServerName:                  cs.ServerName,
+				PeerCertificates:            cs.PeerCertificates,
+				VerifiedChains:              cs.VerifiedChains,
+				SignedCertificateTimestamps: cs.SignedCertificateTimestamps,
+				OCSPResponse:                cs.OCSPResponse,
+			})
+		}
 	}
 
 	if c.GetClientCertificate != nil {
