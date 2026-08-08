@@ -2,9 +2,11 @@ package handshake
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -107,8 +109,22 @@ func NewCryptoSetupClient(
 	cs.serverRandomPrefix = serverRandomPrefix
 	cs.serverRandomMask = serverRandomMask
 	cs.serverRandomVerify = serverRandomVerify
-	_ = clientRandomPrefix
-	_ = clientRandomMask
+
+	// Apply ClientRandomPrefix/Mask by wrapping Rand. The first 32-byte read
+	// during the client handshake is the ClientHello.random (true for both
+	// crypto/tls and uTLS ApplyPreset on a QUIC connection). Subsequent reads
+	// are left untouched so key shares, GREASE seeds, etc. stay random.
+	if len(clientRandomPrefix) > 0 {
+		base := tlsConf.Rand
+		if base == nil {
+			base = rand.Reader
+		}
+		tlsConf.Rand = &clientRandomPrefixReader{
+			base:   base,
+			prefix: clientRandomPrefix,
+			mask:   clientRandomMask,
+		}
+	}
 
 	if chromeParrot {
 		conn, err := newUTLSQUICClient(tlsConf)
@@ -125,6 +141,45 @@ func NewCryptoSetupClient(
 	cs.conn.SetTransportParameters(cs.ourParams.Marshal(protocol.PerspectiveClient))
 
 	return cs, nil
+}
+
+// clientRandomPrefixReader wraps an io.Reader and overwrites the leading bytes
+// of the first full 32-byte read according to prefix/mask. This is how we set
+// Config.ClientRandomPrefix without forking crypto/tls or depending on
+// unexported uTLS fields.
+type clientRandomPrefixReader struct {
+	base    io.Reader
+	prefix  []byte
+	mask    []byte
+	applied bool
+}
+
+func (r *clientRandomPrefixReader) Read(p []byte) (int, error) {
+	n, err := r.base.Read(p)
+	if err != nil {
+		return n, err
+	}
+	if !r.applied && len(p) == 32 && n == 32 {
+		r.applied = true
+		applyClientRandomPrefix(p, r.prefix, r.mask)
+	}
+	return n, nil
+}
+
+// applyClientRandomPrefix sets the leading bytes of random according to the
+// same mask semantics used by the server-side validation path:
+//
+//	random[i] = (random[i] & ^mask[i]) | (prefix[i] & mask[i])
+//
+// A missing mask means all bits (0xff).
+func applyClientRandomPrefix(random, prefix, mask []byte) {
+	for i := 0; i < len(prefix) && i < len(random); i++ {
+		m := byte(0xff)
+		if i < len(mask) {
+			m = mask[i]
+		}
+		random[i] = (random[i] & ^m) | (prefix[i] & m)
+	}
 }
 
 // NewCryptoSetupServer creates a new crypto setup for the server
