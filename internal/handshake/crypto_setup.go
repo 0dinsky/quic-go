@@ -182,13 +182,19 @@ func applyClientRandomPrefix(random, prefix, mask []byte) {
 	}
 }
 
-// NewCryptoSetupServer creates a new crypto setup for the server
+// NewCryptoSetupServer creates a new crypto setup for the server.
+// serverRandomPrefix/Mask and serverRandomVerify enforce ClientHello.Random
+// checks on the first Initial CRYPTO ClientHello (see handleMessage).
+// When serverRandomVerify is set it takes precedence over prefix/mask.
 func NewCryptoSetupServer(
 	connID protocol.ConnectionID,
 	localAddr, remoteAddr net.Addr,
 	tp *wire.TransportParameters,
 	tlsConf *tls.Config,
 	allow0RTT bool,
+	serverRandomPrefix []byte,
+	serverRandomMask []byte,
+	serverRandomVerify func(random [32]byte) bool,
 	rttStats *utils.RTTStats,
 	qlogger qlogwriter.Recorder,
 	logger utils.Logger,
@@ -204,6 +210,9 @@ func NewCryptoSetupServer(
 		version,
 	)
 	cs.allow0RTT = allow0RTT
+	cs.serverRandomPrefix = serverRandomPrefix
+	cs.serverRandomMask = serverRandomMask
+	cs.serverRandomVerify = serverRandomVerify
 
 	tlsConf = setupConfigForServer(tlsConf, localAddr, remoteAddr)
 
